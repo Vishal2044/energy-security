@@ -1,0 +1,73 @@
+import { model, Schema, type InferSchemaType } from 'mongoose';
+
+// The API uses readable IDs such as guard_01 and site_1. Keeping them as the
+// Mongo _id makes seeded data deterministic and keeps offline client records
+// idempotent across memory and MongoDB adapters.
+const UserSchema = new Schema({ _id: String, tenantId: { type: String, index: true }, email: { type: String, unique: true, index: true }, passwordHash: String, name: String, role: { type: String, enum: ['ADMIN', 'MAIN_SECURITY', 'GUARD'] }, guardId: String, mobile: String, alternateMobile: String, aadharNumber: String, bank: Schema.Types.Mixed, profilePhoto: String, preferredLanguage: { type: String, default: 'gu' }, active: { type: Boolean, default: true }, lastLoginAt: Date, failedLoginCount: { type: Number, default: 0 }, lockedUntil: Date, passwordChangeRequired: { type: Boolean, default: false } }, { timestamps: true });
+// Missing assignments intentionally grant no supervisor site access. No backfill.
+UserSchema.add({ assignedSiteIds: { type: [String], default: undefined }, accessRevision: Number });
+const GuardSchema = new Schema({ _id: String, tenantId: { type: String, index: true }, employeeCode: { type: String, unique: true, index: true }, name: String, nameGujarati: String, mobile: String, alternateMobile: String, address: String, village: String, taluka: String, district: String, profilePhoto: String, assignedSite: { type: String, ref: 'Site' }, joiningDate: Date, employmentStatus: { type: String, default: 'ACTIVE' }, employmentType: String, emergencyContacts: Schema.Types.Mixed, skills: [String], trainingTags: [String], policeVerificationStatus: String, onboardingChecklist: Schema.Types.Mixed, trainingAcknowledgedAt: Date, idCardNumber: String, uniformEquipment: Schema.Types.Mixed, lifecycleEvents: Schema.Types.Mixed, transferHistory: Schema.Types.Mixed, accountStatusReason: String, sensitiveChangeRequestId: String, bank: { accountHolderName: String, bankName: String, accountNumber: String, ifscCode: String, branchName: String }, documents: Schema.Types.Mixed, documentCount: Number, preferredLanguage: { type: String, default: 'gu' }, monthlySalary: Number, userId: { type: String, ref: 'User' } }, { timestamps: true });
+const SiteSchema = new Schema({ _id: String, tenantId: { type: String, index: true }, siteCode: { type: String, unique: true, index: true }, siteName: String, siteType: String, farmerAddress: String, clientName: String, clientContact: String, siteAddress: String, reportingInstructions: String, approvedGuardStrength: Number, requiredShiftCoverage: Number, contracts: Schema.Types.Mixed, emergencyContacts: Schema.Types.Mixed, region: String, zone: String, cluster: String, sop: String, postOrders: String, holidayRequirements: Schema.Types.Mixed, equipmentRequirements: Schema.Types.Mixed, complianceIndicators: Schema.Types.Mixed, closureReason: String, assignedGuardHistory: Schema.Types.Mixed, district: String, subDistrict: String, village: String, mapLink: String, latitude: Number, longitude: Number, geofenceRadiusMeters: Number, description: String, status: { type: String, default: 'ACTIVE' }, assignedGuards: [{ type: String, ref: 'Guard' }] }, { timestamps: true });
+const AttendanceSchema = new Schema({ _id: String, guardId: { type: String, ref: 'Guard', index: true }, siteId: { type: String, ref: 'Site' }, shiftId: { type: String, ref: 'Shift', index: true }, type: String, photo: String, capturedAt: Date, capturedAtClient: Date, receivedAt: Date, status: String, verificationStatus: String, clientRecordId: { type: String, unique: true, sparse: true }, verificationRequestId: String, notes: String, photoHash: { type: String, index: true }, photoPerceptualHash: { type: String, index: true }, photoMimeType: String, photoByteSize: Number, photoWidth: Number, photoHeight: Number, exifCapturedAt: Date, clientQueuedAt: Date, reviewFlags: Schema.Types.Mixed, similarPhotoMatches: Schema.Types.Mixed, reviewDueAt: Date, correctionRequestId: String, rejectionReason: String, verifiedAt: Date, verifiedBy: String }, { timestamps: true });
+AttendanceSchema.index({ guardId: 1, capturedAt: -1 });
+AttendanceSchema.index({ siteId: 1, capturedAt: -1 });
+AttendanceSchema.index({ photoHash: 1 });
+AttendanceSchema.index({ photoPerceptualHash: 1 });
+AttendanceSchema.add({ tenantId: { type: String, index: true } });
+const AttendanceCorrectionSchema = new Schema({ _id: String, attendanceId: { type: String, ref: 'Attendance', index: true }, guardId: { type: String, ref: 'Guard', index: true }, siteId: { type: String, ref: 'Site', index: true }, requestedBy: String, reason: String, status: { type: String, default: 'OPEN' }, decisionReason: String, resolvedBy: String, resolvedAt: Date }, { timestamps: true });
+const VerificationRequestSchema = new Schema({ _id: String, guardId: String, siteId: String, shiftId: { type: String, ref: 'Shift' }, requestCreatedAt: Date, notificationSentAt: Date, notificationOpenedAt: Date, verificationSubmittedAt: Date, expiresAt: Date, status: String, notificationStatus: String }, { timestamps: true });
+const DocumentSchema = new Schema({ _id: String, guardId: String, userId: String, type: String, originalName: String, storageKey: String, mimeType: String, size: Number, uploadedBy: String, uploadedAt: Date, notes: String, status: { type: String, default: 'PENDING' }, reviewedBy: String, reviewedAt: Date, reviewerComment: String, rejectionReason: String, expiresAt: Date, version: { type: Number, default: 1 }, previousDocumentId: String, fileHash: String, duplicateOf: String, duplicateWarning: String, documentNumberMasked: String, sensitive: { type: Boolean, default: false }, required: { type: Boolean, default: false }, checklistKey: String, uploadedByRole: String, lastAccessedAt: Date }, { timestamps: true });
+DocumentSchema.index({ guardId: 1, type: 1, version: -1 });
+DocumentSchema.index({ status: 1, expiresAt: 1 });
+DocumentSchema.index({ duplicateOf: 1 });
+DocumentSchema.index({ fileHash: 1 });
+DocumentSchema.add({ tenantId: { type: String, index: true } });
+const IncidentSchema = new Schema({ _id: String, guardId: String, siteId: String, shiftId: { type: String, ref: 'Shift' }, category: String, severity: String, priority: String, description: String, photo: String, attachments: Schema.Types.Mixed, witnesses: Schema.Types.Mixed, comments: Schema.Types.Mixed, activity: Schema.Types.Mixed, assignedOfficerId: String, acknowledgedAt: Date, escalatedAt: Date, dueAt: Date, resolutionEvidence: Schema.Types.Mixed, closureVerifiedBy: String, reopenedReason: String, recurrenceKey: String, correctiveActions: String, preventiveActions: String, handoverNotes: String, followUpTasks: Schema.Types.Mixed, capturedAt: Date, status: { type: String, default: 'OPEN' } }, { timestamps: true });
+IncidentSchema.add({ tenantId: { type: String, index: true } });
+const SalarySchema = new Schema({ _id: String, guardId: String, month: Number, year: Number, attendanceDays: Number, baseSalary: Number, adjustments: Number, finalSalary: Number, status: { type: String, default: 'PENDING' }, paidAt: Date, paidBy: String, payPeriodStart: String, payPeriodEnd: String, basicSalary: Number, payableDays: Number, scheduledDays: Number, overtimeHours: Number, overtimeAmount: Number, holidayPay: Number, allowances: Number, advances: Number, deductions: Number, arrears: Number, netPayable: Number, workflowStatus: { type: String, default: 'DRAFT' }, approvedBy: String, approvedAt: Date, lockedBy: String, lockedAt: Date, paymentReference: String, partialPaidAmount: Number, paymentDate: Date, correctionHistory: Schema.Types.Mixed, approvalHistory: Schema.Types.Mixed, calculationPolicyVersion: String, currency: { type: String, default: 'INR' }, reconciliationStatus: String, payslipStorageKey: String }, { timestamps: true });
+SalarySchema.index({ guardId: 1, month: 1, year: 1 }, { unique: true });
+SalarySchema.index({ workflowStatus: 1, year: 1, month: 1 });
+SalarySchema.add({ tenantId: { type: String, index: true } });
+const NotificationSchema = new Schema({ _id: String, tenantId: { type: String, index: true }, userId: String, guardId: String, siteId: { type: String, index: true }, requestId: String, title: String, body: String, kind: String, deepLink: String, priority: { type: String, default: 'NORMAL' }, deliveryStatus: String, deliveryAttempts: { type: Number, default: 0 }, lastDeliveryAt: Date, lastDeliveryError: String, retryAt: Date, status: { type: String, default: 'UNREAD' }, requiresAcknowledgement: { type: Boolean, default: false }, acknowledgedAt: Date, acknowledgedBy: String, quietHoursBypass: { type: Boolean, default: false }, dedupeKey: String, source: String, expiresAt: Date, createdAt: Date, readAt: Date }, { timestamps: true });
+NotificationSchema.index({ userId: 1, status: 1, createdAt: -1 });
+NotificationSchema.index({ guardId: 1, status: 1, createdAt: -1 });
+NotificationSchema.index({ siteId: 1, status: 1, createdAt: -1 });
+const NotificationPreferenceSchema = new Schema({ _id: String, userId: { type: String, unique: true, index: true }, enabled: { type: Boolean, default: true }, channels: { inApp: { type: Boolean, default: true }, push: { type: Boolean, default: true }, sms: { type: Boolean, default: false }, email: { type: Boolean, default: false }, whatsapp: { type: Boolean, default: false } }, categories: Schema.Types.Mixed, quietHoursStart: String, quietHoursEnd: String, timezone: { type: String, default: 'Asia/Kolkata' } }, { timestamps: true });
+const PushSubscriptionSchema = new Schema({ _id: String, userId: String, endpoint: String, keys: Schema.Types.Mixed }, { timestamps: true });
+const AuditLogSchema = new Schema({ _id: String, actor: String, action: String, entityType: String, entityId: String, metadata: Schema.Types.Mixed, at: Date }, { timestamps: true });
+const ActivitySchema = new Schema({ _id: String, title: String, detail: String, kind: String, at: Date }, { timestamps: true });
+const ShiftSchema = new Schema({ _id: String, guardId: { type: String, ref: 'Guard', index: true }, siteId: { type: String, ref: 'Site' }, startedAt: Date, endedAt: Date, status: String, startAttendanceId: String, endAttendanceId: String, verificationCount: { type: Number, default: 0 } }, { timestamps: true });
+ShiftSchema.index({ guardId: 1, status: 1 }, { unique: true, partialFilterExpression: { status: 'ACTIVE' } });
+const RosterSchema = new Schema({ _id: String, guardId: { type: String, ref: 'Guard', index: true }, siteId: { type: String, ref: 'Site', index: true }, businessDate: { type: String, index: true }, shiftType: String, startAt: Date, endAt: Date, overnight: Boolean, recurrenceRule: Schema.Types.Mixed, weeklyOff: Boolean, holidayCode: String, dutyStatus: String, lateMinutes: Number, earlyDepartureMinutes: Number, status: { type: String, default: 'SCHEDULED' }, acknowledgedAt: Date, assignedBy: String, notes: String, handoverNotes: String, locked: Boolean, conflictFlags: Schema.Types.Mixed, changeHistory: Schema.Types.Mixed }, { timestamps: true });
+RosterSchema.index({ guardId: 1, startAt: 1, endAt: 1 });
+RosterSchema.index({ siteId: 1, businessDate: 1 });
+const LeaveRequestSchema = new Schema({ _id: String, guardId: { type: String, ref: 'Guard', index: true }, startDate: String, endDate: String, leaveType: String, reason: String, status: { type: String, default: 'PENDING' }, requestedAt: Date, approvedBy: String, approvedAt: Date, decisionReason: String, replacementGuardId: String }, { timestamps: true });
+LeaveRequestSchema.index({ guardId: 1, startDate: 1, endDate: 1 });
+const ReplacementSchema = new Schema({ _id: String, rosterId: String, siteId: { type: String, ref: 'Site', index: true }, absentGuardId: String, replacementGuardId: String, reason: String, status: { type: String, default: 'OPEN' }, requestedBy: String, approvedBy: String, approvedAt: Date, decisionReason: String }, { timestamps: true });
+const OvertimeSchema = new Schema({ _id: String, guardId: { type: String, ref: 'Guard', index: true }, siteId: { type: String, ref: 'Site', index: true }, rosterId: String, businessDate: String, hours: Number, reason: String, status: { type: String, default: 'PENDING' }, requestedBy: String, approvedBy: String, approvedAt: Date, decisionReason: String }, { timestamps: true });
+const SensitiveChangeRequestSchema = new Schema({ _id: String, entityType: String, entityId: String, requestedBy: String, changes: Schema.Types.Mixed, reason: String, status: { type: String, default: 'OPEN' }, decidedBy: String, decidedAt: Date, decisionReason: String }, { timestamps: true });
+const SessionSchema = new Schema({ _id: String, userId: { type: String, ref: 'User', index: true }, familyId: { type: String, index: true }, tokenHash: { type: String, unique: true, index: true }, createdAt: Date, expiresAt: Date, revokedAt: Date, replacedByHash: String, lastUsedAt: Date, userAgent: String, ip: String }, { timestamps: false });
+SessionSchema.index({ userId: 1, createdAt: -1 });
+
+export const UserModel = model('User', UserSchema);
+export const GuardModel = model('Guard', GuardSchema);
+export const SiteModel = model('Site', SiteSchema);
+export const AttendanceModel = model('Attendance', AttendanceSchema);
+export const AttendanceCorrectionModel = model('AttendanceCorrection', AttendanceCorrectionSchema);
+export const VerificationRequestModel = model('VerificationRequest', VerificationRequestSchema);
+export const DocumentModel = model('Document', DocumentSchema);
+export const IncidentModel = model('Incident', IncidentSchema);
+export const SalaryModel = model('Salary', SalarySchema);
+export const NotificationModel = model('Notification', NotificationSchema);
+export const NotificationPreferenceModel = model('NotificationPreference', NotificationPreferenceSchema);
+export const PushSubscriptionModel = model('PushSubscription', PushSubscriptionSchema);
+export const AuditLogModel = model('AuditLog', AuditLogSchema);
+export const ActivityModel = model('Activity', ActivitySchema);
+export const ShiftModel = model('Shift', ShiftSchema);
+export const RosterModel = model('Roster', RosterSchema);
+export const LeaveRequestModel = model('LeaveRequest', LeaveRequestSchema);
+export const ReplacementModel = model('Replacement', ReplacementSchema);
+export const OvertimeModel = model('Overtime', OvertimeSchema);
+export const SensitiveChangeRequestModel = model('SensitiveChangeRequest', SensitiveChangeRequestSchema);
+export const SessionModel = model('Session', SessionSchema);
+export type UserDocument = InferSchemaType<typeof UserSchema>;

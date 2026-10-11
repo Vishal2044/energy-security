@@ -1,0 +1,8 @@
+node_modules
+dist
+client/dist
+.env
+uploads/*
+!.gitkeep
+*.log
+ALL_30_CODEX_PROMPTS.md

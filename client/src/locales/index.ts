@@ -1,0 +1,7 @@
+import type { Language } from './runtime';
+export type { Language } from './runtime';
+
+export const copy: Record<Language, { dashboard: string; operations: string; guards: string; sites: string; attendance: string; incidents: string; salaries: string; documents: string; team: string; audit: string; logout: string; onDuty: string; pending: string; open: string; activeSites: string; welcome: string; workspace: string; settings: string; language: string; systemOperational: string; lastSync: string }> = {
+  en: { dashboard: 'Dashboard', operations: 'Operations', guards: 'Guards', sites: 'Sites', attendance: 'Attendance', incidents: 'Incidents', salaries: 'Salary', documents: 'Documents', team: 'Team & roles', audit: 'Audit log', logout: 'Sign out', onDuty: 'On duty', pending: 'Pending', open: 'Open incidents', activeSites: 'Active sites', welcome: 'Good morning', workspace: 'WORKSPACE', settings: 'Settings', language: 'Language', systemOperational: 'All systems operational', lastSync: 'Last sync just now' },
+  gu: { dashboard: 'ડેશબોર્ડ', operations: 'કામગીરી', guards: 'ગાર્ડ્સ', sites: 'સાઇટ્સ', attendance: 'હાજરી', incidents: 'ઘટનાઓ', salaries: 'પગાર', documents: 'દસ્તાવેજો', team: 'ટીમ અને ભૂમિકાઓ', audit: 'ઓડિટ લોગ', logout: 'બહાર નીકળો', onDuty: 'ફરજ પર', pending: 'બાકી', open: 'ખુલ્લી ઘટનાઓ', activeSites: 'સક્રિય સાઇટ્સ', welcome: 'નમસ્તે', workspace: 'કાર્યસ્થળ', settings: 'સેટિંગ્સ', language: 'ભાષા', systemOperational: 'બધી સિસ્ટમ કાર્યરત છે', lastSync: 'છેલ્લું સિંક હમણાં થયું' },
+};
