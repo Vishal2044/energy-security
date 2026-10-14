@@ -1,59 +1,44 @@
-import { Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Image as ImageIcon, MapPinned, Shield, Users } from 'lucide-react';
-import { format } from 'date-fns';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
+import { Camera, Users, MapPinned, AlertTriangle, CheckCircle2, Clock3 } from 'lucide-react';
+import { addBusinessDays } from '../../../shared/photoDuty';
 import { getData } from '../lib/api';
-import { EmptyState, LoadingState, PageHeader, StatCard } from '../components/ui';
-
-type DashboardData = {
-  totalGuards: number;
-  onDuty: number;
-  notStarted: number;
-  verificationPending: number;
-  missedVerification: number;
-  openIncidents: number;
-  activeSites: number;
-  pendingSalaries: number;
-  teamMembers: number;
-  trend: Array<{ day: string; value: number }>;
-  siteStats: Array<{ site: string; attendance: number }>;
-  activities: Array<{ id: string; title: string; detail: string; kind: string; at: string }>;
+import { useLanguage } from '../locales/runtime';
+import { ErrorState, LoadingState, PageHeader, StatCard } from '../components/ui';
+export type PhotoOperationsData = {
+  businessDate: string;
+  summary: { sites: number; rostered: number; attendanceSubmitted: number; pendingAttendance: number; receivedPhotos: number; missedPhotos: number; absentGuards: number; unconfiguredGuards: number; openIncidents: number };
+  sites: { siteCode: string; siteName: string; assignedGuards: number; expectedCoverage: number; rostered: number; attendanceSubmitted: number; shortage: number; receivedPhotos: number; missedPhotos: number; openIncidents: number }[];
+  trend: { day: string; value: number }[];
+  recentPhotos: { id: string; guard?: string; photo?: string; capturedAt: string }[];
 };
-
-type RecentAttendance = {
-  id: string;
-  guard?: string;
-  site?: string;
-  photo?: string;
-  capturedAt: string;
-  status: string;
-};
-
 export function AdminDashboardPage({ adminView = true }: { adminView?: boolean }) {
-  const { data, isLoading, isError, refetch } = useQuery({ queryKey: ['dashboard'], queryFn: () => getData<DashboardData>('/dashboard') });
-  const recentAttendance = useQuery({ queryKey: ['dashboard-attendance'], queryFn: () => getData<{ attendance: RecentAttendance[] }>('/attendance/history?limit=4') });
-  if (isError) return <div className="error-callout">Dashboard could not be loaded. <button onClick={() => void refetch()}>Retry</button></div>;
-  if (isLoading || !data) return <LoadingState />;
-
-  return <>
-    <PageHeader eyebrow="ADMIN CONTROL CENTER" title="Good morning, admin" description="Set up your workforce, sites and security operations from one place." action={adminView ? <Link className="button primary" to="/team">Manage team <ArrowUpRight size={16} /></Link> : undefined} />
-    <div className="stat-grid">
-      <StatCard label="Active guards" value={data.totalGuards} icon={<Users />} detail={`${data.onDuty} currently on duty`} />
-      <StatCard label="Active sites" value={data.activeSites} icon={<MapPinned />} tone="green" detail="Ready for assignments" />
-      {adminView && <StatCard label="Security managers" value={data.teamMembers} icon={<Shield />} tone="blue" detail="Admin-managed accounts" />}
-      <StatCard label="Open incidents" value={data.openIncidents} icon={<AlertTriangle />} tone="rose" detail="Needs attention" />
+  const gu = useLanguage() === 'gu';
+  const query = useQuery({ queryKey: ['photo-operations'], queryFn: () => getData<PhotoOperationsData>('/photo-duty/operations'), refetchInterval: 30000 });
+  if (query.isError) return <ErrorState onRetry={() => void query.refetch()}/>;
+  if (query.isLoading || !query.data) return <LoadingState/>;
+  const data = query.data;
+  const dateLabel = new Date(`${data.businessDate}T12:00:00+05:30`).toLocaleDateString(gu ? 'gu-IN' : 'en-IN', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
+  const trendMax = Math.max(1, ...data.trend.map((day) => day.value));
+  const trendTotal = data.trend.reduce((sum, day) => sum + day.value, 0);
+  return <div className="management-dashboard">
+    <PageHeader eyebrow={adminView ? 'ADMIN OVERVIEW' : 'SITE OVERVIEW'} title={gu ? 'સુરક્ષા કામગીરી ડેશબોર્ડ' : 'Security operations dashboard'} description={`${dateLabel} · IST`} action={<Link className="button primary" to="/users/new">{gu ? 'ગાર્ડ ઉમેરો' : 'Add guard'}</Link>}/>
+    <div className="management-context-strip"><span>{gu ? 'આજની કામગીરી અને ચાલુ રાતની ફરજ' : 'Today’s operations and ongoing night duty'}</span><Link to="/operations">{gu ? 'સાઇટ પ્રમાણે જુઓ →' : 'Explore by site →'}</Link></div>
+    <div className="stat-grid management-stat-grid">
+      <StatCard label={gu ? 'સક્રિય સાઇટ' : 'Active sites'} value={data.summary.sites} icon={<MapPinned/>} detail={gu ? 'તમારા ઍક્સેસમાં આવતી સાઇટ' : 'Within your permitted site access'}/>
+      <StatCard label={gu ? 'નક્કી કરેલ ફરજ' : 'Scheduled duties'} value={data.summary.rostered} icon={<Users/>} detail={gu ? 'ફોટો શેડ્યૂલ ધરાવતા ગાર્ડ' : 'Guards with configured photo duty'}/>
+      <StatCard label={gu ? 'ફોટો મોકલનાર ગાર્ડ' : 'Guards with photos'} value={data.summary.attendanceSubmitted} icon={<CheckCircle2/>} tone="green" detail={gu ? 'ઓછામાં ઓછો એક ફોટો મળ્યો' : 'At least one photo received'}/>
+      <StatCard label={gu ? 'હજી ફોટો નથી' : 'No photos yet'} value={data.summary.pendingAttendance} icon={<Clock3/>} tone="amber" detail={gu ? 'ફોટો બાકી; ફરજ હજી ચાલુ હોઈ શકે' : 'Includes duties still in progress'}/>
+      <StatCard label={gu ? 'મળેલા ફોટો' : 'Received photos'} value={data.summary.receivedPhotos} icon={<Camera/>} tone="green" detail={gu ? 'દરેક ફોટો તેના દર પ્રમાણે કમાણી કરે' : 'Each photo earns its recorded rate'}/>
+      <StatCard label={gu ? 'ચૂકેલા ફોટો' : 'Missed photos'} value={data.summary.missedPhotos} icon={<AlertTriangle/>} tone="rose" detail={gu ? 'સમય પૂરો થયો; આ ફોટોનો પગાર નહીં' : 'Closed slots without a photo · unpaid'}/>
+      <StatCard label={gu ? 'ગેરહાજર ગાર્ડ' : 'Absent guards'} value={data.summary.absentGuards} icon={<Users/>} tone="rose" detail={gu ? 'ફરજ પૂરી થઈ અને એક પણ ફોટો નથી' : 'Duty finished with zero photos'}/>
+      <StatCard label={gu ? 'ખુલ્લી ઘટનાઓ' : 'Open incidents'} value={data.summary.openIncidents} icon={<AlertTriangle/>} tone="amber" detail={gu ? 'ધ્યાન આપવાની બાકી ઘટનાઓ' : 'Incidents still requiring attention'}/>
     </div>
-    <div className="dashboard-grid">
-      <section className="panel chart-panel">
-        <div className="panel-heading"><div><span className="eyebrow">LAST 7 DAYS</span><h2>Verified shift starts</h2></div><span className="trend-up"><CheckCircle2 size={15} /> Live data</span></div>
-        {data.trend.some((item) => item.value > 0) ? <div className="bar-chart">{data.trend.map((item) => <div className="bar-col" key={item.day}><div className="bar" style={{ height: `${Math.max(25, item.value * 35)}px` }}><span>{item.value}</span></div><small>{item.day}</small></div>)}</div> : <EmptyState title="No attendance yet" description="Verified guard activity will appear here after the first shift starts." icon={<Activity />} />}
-      </section>
-      <section className="panel"><div className="panel-heading"><div><span className="eyebrow">SITE HEALTH</span><h2>Attendance by site</h2></div><MapPinned size={19} className="muted-icon" /></div>{data.siteStats.length ? <div className="site-health">{data.siteStats.map((item) => <div className="health-row" key={item.site}><span>{item.site}</span><div className="progress"><span style={{ width: `${item.attendance}%` }} /></div><strong>{item.attendance}%</strong></div>)}</div> : <EmptyState title="No sites configured" description="Add your first site before assigning guards." icon={<MapPinned />} />}</section>
+    {data.summary.unconfiguredGuards > 0 && <div className="management-setup-notice"><AlertTriangle size={20} aria-hidden="true"/><span><strong>{data.summary.unconfiguredGuards} {gu ? 'ગાર્ડનું શેડ્યૂલ બાકી' : 'guards need duty setup'}</strong><small>{gu ? 'દિવસ/રાતની ફરજ અને પ્રતિ ફોટો દર નક્કી કરો.' : 'Configure day/night duty and a per-photo rate.'}</small></span><Link className="button secondary small" to="/guards">{gu ? 'ગાર્ડ જુઓ' : 'View guards'}</Link></div>}
+    <div className="management-dashboard-panels">
+      <section className="panel management-trend-panel"><div className="panel-heading"><div><span className="eyebrow">{gu ? 'છેલ્લા 7 દિવસ' : 'LAST 7 DAYS'}</span><h2>{gu ? 'મળેલા ફરજના ફોટો' : 'Received duty photos'}</h2></div><span className="management-chart-total"><strong>{trendTotal}</strong><small>{gu ? 'કુલ ફોટો' : 'total photos'}</small></span></div><p className="management-panel-note">{gu ? 'દરેક કૉલમ ફરજની તારીખ પ્રમાણે મળેલા ફોટોની સંખ્યા બતાવે છે.' : 'Each column counts received photos by the duty’s starting date.'}</p><div className="bar-chart">{data.trend.map((day,index) => { const date = addBusinessDays(data.businessDate, index - data.trend.length + 1); const label = new Date(`${date}T12:00:00+05:30`).toLocaleDateString(gu ? 'gu-IN' : 'en-IN', {day:'numeric',month:'short',timeZone:'Asia/Kolkata'}); return <div className="bar-col" key={date} aria-label={`${label}: ${day.value} ${gu ? 'ફોટો' : 'photos'}`}><div className={`bar${day.value === 0 ? ' empty' : ''}`} style={{ height: `${Math.max(4, day.value / trendMax * 145)}px` }}><span>{day.value}</span></div><small>{label}</small></div>; })}</div></section>
+      <section className="panel management-shortcuts"><span className="eyebrow">{gu ? 'ઝડપી ઍક્સેસ' : 'QUICK ACCESS'}</span><h2>{gu ? 'આગળ શું જોવું છે?' : 'Explore your workspace'}</h2><Link to="/attendance"><Camera size={20}/><span><strong>{gu ? 'હાજરી કેલેન્ડર' : 'Attendance calendar'}</strong><small>{gu ? 'તારીખ અને ગાર્ડ પ્રમાણે ફોટો' : 'Photos by date and guard'}</small></span><b aria-hidden="true">→</b></Link><Link to="/salary"><CheckCircle2 size={20}/><span><strong>{gu ? 'પગાર અને રોજની કમાણી' : 'Salary & daily earnings'}</strong><small>{gu ? 'ફોટો, કમાણી અને ચૂકવણી' : 'Photos, earnings and payments'}</small></span><b aria-hidden="true">→</b></Link><Link to="/incidents"><AlertTriangle size={20}/><span><strong>{gu ? 'ઘટનાઓ' : 'Incidents'}</strong><small>{gu ? 'બાકી ઘટનાઓની વિગતો' : 'Review outstanding incidents'}</small></span><b aria-hidden="true">→</b></Link></section>
     </div>
-    <div className="bottom-grid">
-      <section className="panel activity-panel"><div className="panel-heading"><div><span className="eyebrow">AUDITABLE ACTIVITY</span><h2>Recent activity</h2></div>{adminView && <Link className="link-button" to="/audit">View audit <ArrowUpRight size={15} /></Link>}</div>{data.activities.length ? <div className="activity-list">{data.activities.map((item) => <div className="activity-row" key={item.id}><div className={`activity-icon ${item.kind}`}><CheckCircle2 size={17} /></div><div><strong>{item.title}</strong><span>{item.detail}</span></div><time>{format(new Date(item.at), 'HH:mm')}</time></div>)}</div> : <EmptyState title="No activity yet" description="Admin actions and field events will appear here." />}</section>
-      <section className="panel quick-panel"><span className="eyebrow">SETUP STATUS</span><h2>Workspace readiness</h2><div className="pulse-item"><span>Guards not started</span><strong>{data.notStarted}</strong></div><div className="pulse-item"><span>Pending verifications</span><strong>{data.verificationPending}</strong></div><div className="pulse-item"><span>Missed verifications</span><strong>{data.missedVerification}</strong></div>{adminView && <div className="pulse-item"><span>Pending salaries</span><strong>{data.pendingSalaries}</strong></div>}</section>
-    </div>
-    <section className="panel dashboard-evidence-panel"><div className="panel-heading"><div><span className="eyebrow">PHOTO EVIDENCE</span><h2>Recent attendance images</h2></div><Link className="link-button" to="/attendance">Open attendance review <ArrowUpRight size={15} /></Link></div>{recentAttendance.isLoading ? <LoadingState /> : recentAttendance.isError ? <div className="error-callout">Attendance images could not be loaded. / હાજરીના ફોટા લાવી શકાઈ નથી. <button onClick={() => void recentAttendance.refetch()}>Retry / ફરી પ્રયાસ</button></div> : recentAttendance.data?.attendance?.length ? <div className="dashboard-evidence-grid">{recentAttendance.data.attendance.map((item) => <Link className="dashboard-evidence-card" to="/attendance" key={item.id}>{item.photo ? <img src={item.photo} alt={`Attendance evidence for ${item.guard ?? 'guard'}`} /> : <div className="dashboard-evidence-missing"><ImageIcon size={24} /></div>}<div><strong>{item.guard ?? 'Unknown guard'}</strong><span>{item.site ?? 'Unknown site'}</span><small>{format(new Date(item.capturedAt), 'dd MMM yyyy, HH:mm')}</small><em>{item.status.replaceAll('_', ' ')}</em></div></Link>)}</div> : <EmptyState title="No attendance images yet" description="Uploaded guard images will appear here after the first submission." icon={<ImageIcon />} />}</section>
-  </>;
+    <section className="panel dashboard-evidence-panel"><div className="panel-heading"><div><span className="eyebrow">{gu ? 'તાજેતરની માહિતી' : 'RECENT ACTIVITY'}</span><h2>{gu ? 'તાજેતરના લાઇવ ફોટો' : 'Recent live photos'}</h2></div><Link className="button secondary small" to="/attendance">{gu ? 'બધા જુઓ' : 'View all'}</Link></div><div className="dashboard-evidence-grid">{data.recentPhotos.map((photo) => <Link key={photo.id} className="dashboard-evidence-card" to="/attendance">{photo.photo ? <img src={photo.photo} loading="lazy" alt={gu ? 'હાજરી ફોટો' : 'Duty photo'}/> : <span className="management-photo-placeholder"><Camera size={24}/></span>}<strong>{photo.guard || (gu ? 'ગાર્ડ' : 'Guard')}</strong><small>{new Date(photo.capturedAt).toLocaleString(gu ? 'gu-IN' : 'en-IN', { timeZone: 'Asia/Kolkata' })}</small></Link>)}</div>{!data.recentPhotos.length && <div className="management-empty-inline"><Camera size={24}/><span>{gu ? 'હજી ફોટો મળ્યા નથી.' : 'No live photos received yet.'}</span></div>}</section>
+  </div>;
 }

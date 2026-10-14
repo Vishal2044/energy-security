@@ -20,10 +20,13 @@ Role-based security agency management application.
 - Use safe migrations when changes are required.
 
 ## Attendance
-- Follow the approved image-upload workflow.
+- Follow the approved scheduled live-camera workflow: four photo slots per day/night duty, each with a two-hour server deadline.
 - Do not reintroduce GPS or live tracking without approval.
 - Do not claim photo metadata proves physical presence.
-- Prevent duplicate submissions and handle offline retries.
+- Prevent duplicate slot submissions. Timed photos must arrive before the deadline; do not backdate offline submissions.
+- Guard data is read-only except for live duty-photo submission.
+- Admin and assigned-site Supervisors create guard profiles and add already-approved documents.
+- Attendance and salary are calculated per received photo; no attendance/document review workflow.
 
 ## Implementation
 - Implement features incrementally.

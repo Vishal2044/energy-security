@@ -11,10 +11,10 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.svg'],
+      includeAssets: ['favicon.svg', 'fonts/*.ttf', 'fonts/*-OFL.txt'],
       manifest: {
-        name: 'Elector Security', short_name: 'DG Security', start_url: '/', display: 'standalone',
-        background_color: '#f4f8fb', theme_color: '#0b6e87', description: 'Simple, secure duty and attendance for Elector.',
+        name: 'DG Energy', short_name: 'DG Energy', start_url: '/', display: 'standalone',
+        background_color: '#F8F5F1', theme_color: '#6D4AFF', description: 'Simple, secure duty and attendance for DG Energy.',
         icons: [{ src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' }]
       },
       workbox: { navigateFallback: '/', runtimeCaching: [{ urlPattern: /\/api\//, handler: 'NetworkOnly' }] }

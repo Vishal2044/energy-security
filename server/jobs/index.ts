@@ -1,20 +1,18 @@
+import { currentPhotoDuty, scopedPhotoGuards } from '../services/photoDuty.js';
 import cron from 'node-cron';
 import { isDatabaseConnected } from '../db.js';
-import { AttendanceModel, DocumentModel, IncidentModel, RosterModel, SalaryModel, VerificationRequestModel } from '../models/index.js';
+import { IncidentModel, SalaryModel } from '../models/index.js';
 import { db } from '../services/memory.js';
 import { createNotification, retryNotifications } from '../services/notifications.js';
 import { indiaBusinessDate } from '../../shared/time.js';
 
-async function documentExpiryReminders(now: Date) {
-  const until = new Date(now.getTime() + 30 * 86400000); const dateKey = indiaBusinessDate(now);
-  const documents: any[] = isDatabaseConnected() ? await DocumentModel.find({ expiresAt: { $gte: now, $lte: until }, status: { $ne: 'REJECTED' } }).limit(500) : db.documents.filter((item) => item.expiresAt && new Date(item.expiresAt).getTime() >= now.getTime() && new Date(item.expiresAt).getTime() <= until.getTime() && item.status !== 'REJECTED').slice(0, 500);
-  for (const document of documents) await createNotification({ guardId: String(document.guardId), kind: 'DOCUMENT_EXPIRY', title: 'Document expiry reminder', body: `${String(document.type).replaceAll('_', ' ')} expires soon. Please upload a replacement.`, deepLink: '/guard/documents', source: 'EXPIRY_JOB', dedupeKey: `document-expiry:${String(document._id ?? document.id)}:${dateKey}`, priority: 'HIGH' });
-}
-async function attendanceMissingReminders(now: Date) {
-  const date = indiaBusinessDate(now); const rosters: any[] = isDatabaseConnected() ? await RosterModel.find({ businessDate: date, status: { $in: ['SCHEDULED', 'ACKNOWLEDGED'] }, startAt: { $lte: new Date(now.getTime() - 30 * 60000) } }).limit(500) : db.rosters.filter((item) => item.businessDate === date && ['SCHEDULED', 'ACKNOWLEDGED'].includes(item.status) && new Date(item.startAt).getTime() <= now.getTime() - 30 * 60000).slice(0, 500);
-  for (const roster of rosters) {
-    const guardId = String(roster.guardId); const siteId = String(roster.siteId); const hasAttendance = isDatabaseConnected() ? await AttendanceModel.exists({ guardId, siteId, type: 'SHIFT_START', capturedAt: { $gte: new Date(now.getTime() - 18 * 60 * 60000) } }) : db.attendance.some((item) => item.guardId === guardId && item.siteId === siteId && item.type === 'SHIFT_START' && new Date(item.capturedAt).getTime() >= now.getTime() - 18 * 60 * 60000);
-    if (!hasAttendance) await createNotification({ guardId, siteId: String(roster.siteId), kind: 'ATTENDANCE_MISSING', title: 'Attendance is pending', body: 'Your scheduled duty attendance has not been submitted yet.', deepLink: '/guard/attendance', source: 'ATTENDANCE_JOB', dedupeKey: `attendance-missing:${guardId}:${String(roster._id ?? roster.id)}:${date}`, priority: 'HIGH' });
+async function photoSlotReminders(now: Date) {
+  const guards = await scopedPhotoGuards({ id: 'notification-job', name: 'Duty reminders', email: '', role: 'ADMIN' });
+  for (const guard of guards) {
+    if (guard.employmentStatus !== 'ACTIVE') continue;
+    const duty = await currentPhotoDuty(guard, now); const slot = duty.day?.slots.find((s) => s.status === 'OPEN');
+    if (!duty.active || !slot || !duty.day) continue;
+    await createNotification({ guardId: guard.id, siteId: duty.day.siteId, kind: 'DUTY_PHOTO', title: 'Live duty photo due', body: 'Take and send your live photo before the two-hour window closes.', deepLink: '/guard', source: 'PHOTO_DUTY_JOB', dedupeKey: `photo-slot:${guard.id}:${duty.day.businessDate}:${slot.index}`, priority: 'HIGH' });
   }
 }
 async function incidentEscalationReminders(now: Date) {
@@ -25,14 +23,9 @@ async function payrollPublicationReminders(now: Date) {
   const salaries: any[] = isDatabaseConnected() ? await SalaryModel.find({ workflowStatus: { $in: ['PAID', 'RECONCILED'] }, paidAt: { $gte: new Date(now.getTime() - 24 * 60 * 60000) } }).limit(500) : db.salaries.filter((item) => ['PAID', 'RECONCILED'].includes(String(item.workflowStatus ?? item.status)) && item.paidAt && new Date(item.paidAt).getTime() >= now.getTime() - 24 * 60 * 60000).slice(0, 500);
   for (const salary of salaries) await createNotification({ guardId: String(salary.guardId), kind: 'PAYROLL_PUBLISHED', title: 'Salary record published', body: `Your salary record for ${salary.month}/${salary.year} is available.`, deepLink: '/guard/salary', source: 'PAYROLL_JOB', dedupeKey: `payroll-published:${String(salary._id ?? salary.id)}`, priority: 'NORMAL' });
 }
-export async function runNotificationJobs(now = new Date()) { await documentExpiryReminders(now); await attendanceMissingReminders(now); await incidentEscalationReminders(now); await payrollPublicationReminders(now); await retryNotifications(now); }
+export async function runNotificationJobs(now = new Date()) { await photoSlotReminders(now); await incidentEscalationReminders(now); await payrollPublicationReminders(now); await retryNotifications(now); }
 
-/** Expires verification requests only; it never converts notification failure into payroll absence. */
+/** Absence and earnings are derived from expired photo slots; no approval job is needed. */
 export function startJobs() {
-  cron.schedule('* * * * *', async () => {
-    const now = new Date();
-    if (isDatabaseConnected()) await VerificationRequestModel.updateMany({ status: { $ne: 'VERIFIED' }, expiresAt: { $lt: now } }, { $set: { status: 'EXPIRED' } });
-    else db.verifications.forEach((item) => { if (item.status !== 'VERIFIED' && new Date(item.expiresAt).getTime() < now.getTime()) item.status = 'EXPIRED'; });
-  });
   cron.schedule('*/15 * * * *', () => { void runNotificationJobs().catch((error) => console.error('Notification job failed.', error)); });
 }

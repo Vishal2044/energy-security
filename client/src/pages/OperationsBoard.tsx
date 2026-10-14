@@ -1,36 +1,19 @@
-import { AlertTriangle, CalendarDays, CheckCircle2, ClipboardList, MapPinned, Users } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { getData } from '../lib/api';
-import { EmptyState, LoadingState, PageHeader, StatCard } from '../components/ui';
-
-type OperationsData = {
-  businessDate: string;
-  summary: { sites: number; rostered: number; attendanceSubmitted: number; pendingAttendance: number; openIncidents: number; pendingLeaveRequests: number };
-  sites: Array<{ siteCode: string; siteName: string; assignedGuards: number; expectedCoverage: number; rostered: number; attendanceSubmitted: number; pendingAttendance: number; shortage: number; openIncidents: number }>;
-  upcomingChanges: Array<{ id: string; businessDate: string; shiftType: string; startAt: string; endAt: string; guardId: string; siteId: string }>;
-  escalationQueue: Array<{ id: string; category: string; severity?: string; priority?: string; status: string; description?: string }>;
-};
-
+import { Users, Camera, AlertTriangle, MapPinned } from 'lucide-react';
+import { ErrorState, LoadingState, PageHeader, StatCard } from '../components/ui';
+import { useLanguage } from '../locales/runtime';
+import type { PhotoOperationsData } from './AdminDashboard';
 export function OperationsBoardPage() {
-  const query = useQuery({ queryKey: ['operations-dashboard'], queryFn: () => getData<OperationsData>('/operations/dashboard'), refetchInterval: 60000 });
-  if (query.isLoading || !query.data) return <LoadingState />;
-  if (query.isError) return <div className="error-callout">Operations dashboard could not be loaded. <button onClick={() => void query.refetch()}>Retry</button></div>;
+  const gu = useLanguage() === 'gu';
+  const query = useQuery({ queryKey: ['photo-operations'], queryFn: () => getData<PhotoOperationsData>('/photo-duty/operations'), refetchInterval: 30000 });
+  if (query.isError) return <ErrorState onRetry={() => void query.refetch()}/>;
+  if (query.isLoading || !query.data) return <LoadingState/>;
   const data = query.data;
-  return <>
-    <PageHeader eyebrow="OPERATIONS CONTROL" title="Daily operations" description={`Roster, coverage and escalation visibility for ${data.businessDate}.`} action={<button className="button secondary" onClick={() => void query.refetch()}>Refresh</button>} />
-    <div className="stat-grid">
-      <StatCard label="Rostered guards" value={data.summary.rostered} icon={<Users />} detail={`${data.summary.sites} sites in scope`} />
-      <StatCard label="Attendance submitted" value={data.summary.attendanceSubmitted} icon={<CheckCircle2 />} tone="green" detail={`${data.summary.pendingAttendance} still pending`} />
-      <StatCard label="Open incidents" value={data.summary.openIncidents} icon={<AlertTriangle />} tone="rose" detail="Needs acknowledgement or closure" />
-      <StatCard label="Pending leave" value={data.summary.pendingLeaveRequests} icon={<CalendarDays />} tone="amber" detail="Manager decision required" />
-    </div>
-    <section className="panel table-panel">
-      <div className="panel-heading" style={{ padding: 23 }}><div><span className="eyebrow">SITE COVERAGE</span><h2>Today&apos;s deployment</h2></div><MapPinned size={19} className="muted-icon" /></div>
-      {data.sites.length ? <table><thead><tr><th>Site</th><th>Assigned</th><th>Coverage</th><th>Attendance</th><th>Exceptions</th></tr></thead><tbody>{data.sites.map((site) => <tr key={site.siteCode}><td><strong>{site.siteName}</strong><br /><code>{site.siteCode}</code></td><td>{site.assignedGuards}</td><td>{site.rostered}/{site.expectedCoverage}</td><td>{site.attendanceSubmitted}/{site.rostered}</td><td>{site.shortage > 0 && <span className="badge warning">Short {site.shortage}</span>} {site.openIncidents > 0 && <span className="badge positive">Incidents {site.openIncidents}</span>} {!site.shortage && !site.openIncidents && <span className="badge positive">On track</span>}</td></tr>)}</tbody></table> : <EmptyState title="No sites in scope" description="Assign sites to the security manager or configure an active site." icon={<MapPinned />} />}
-    </section>
-    <div className="bottom-grid" style={{ marginTop: 22 }}>
-      <section className="panel table-panel"><div className="panel-heading" style={{ padding: 23 }}><div><span className="eyebrow">ROSTER CHANGE QUEUE</span><h2>Upcoming duties</h2></div><ClipboardList size={19} className="muted-icon" /></div>{data.upcomingChanges.length ? <table><thead><tr><th>Date</th><th>Shift</th><th>Time</th><th>Guard</th></tr></thead><tbody>{data.upcomingChanges.map((item) => <tr key={item.id}><td>{item.businessDate}</td><td>{item.shiftType}</td><td>{new Date(item.startAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</td><td><code>{item.guardId}</code></td></tr>)}</tbody></table> : <EmptyState title="No upcoming roster changes" description="Newly created duties will appear here." />}</section>
-      <section className="panel"><div className="panel-heading"><div><span className="eyebrow">ESCALATION QUEUE</span><h2>Open incidents</h2></div><AlertTriangle size={19} className="muted-icon" /></div>{data.escalationQueue.length ? <div className="activity-list">{data.escalationQueue.map((item) => <div className="activity-row" key={item.id}><div className="activity-icon incident"><AlertTriangle size={17} /></div><div><strong>{item.category.replaceAll('_', ' ')}</strong><span>{item.severity ?? 'MEDIUM'} · {item.priority ?? 'NORMAL'} · {item.status}</span></div></div>)}</div> : <EmptyState title="No open incidents" description="The escalation queue is clear for this scope." icon={<CheckCircle2 />} />}</section>
-    </div>
-  </>;
+  const dateLabel = new Date(`${data.businessDate}T12:00:00+05:30`).toLocaleDateString(gu ? 'gu-IN' : 'en-IN', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
+  const shortage = data.sites.reduce((sum, site) => sum + site.shortage, 0);
+  return <div className="management-operations"><PageHeader eyebrow="DAILY OPERATIONS" title={gu ? 'સાઇટ પ્રમાણે ફરજ અને હાજરી' : 'Site duty & attendance'} description={`${dateLabel} · IST`} action={<button type="button" className="button secondary" disabled={query.isFetching} onClick={() => void query.refetch()}>{gu ? 'ફરી જુઓ' : 'Refresh'}</button>}/>
+    <div className="stat-grid management-stat-grid"><StatCard label={gu ? 'સક્રિય સાઇટ' : 'Active sites'} value={data.summary.sites} icon={<MapPinned/>} detail={gu ? 'તમારા ઍક્સેસમાં આવતી સાઇટ' : 'Sites within your permitted access'}/><StatCard label={gu ? 'નક્કી કરેલ ફરજ' : 'Scheduled duties'} value={data.summary.rostered} icon={<Users/>} detail={gu ? 'આજની અને ચાલુ રાતની ફરજ' : 'Today and ongoing night duty'}/><StatCard label={gu ? 'મળેલા ફોટો' : 'Received photos'} value={data.summary.receivedPhotos} icon={<Camera/>} tone="green" detail={gu ? `${data.summary.missedPhotos} ફોટો ચૂકી ગયા` : `${data.summary.missedPhotos} missed photos · unpaid`}/><StatCard label={gu ? 'ઓછા નક્કી કરેલ ગાર્ડ' : 'Schedule shortage'} value={shortage} icon={<AlertTriangle/>} tone="rose" detail={gu ? 'જરૂરી સંખ્યા સામે ઓછી ફરજ' : 'Required positions without a scheduled duty'}/></div>
+    <section className="panel management-site-overview"><div className="panel-heading"><div><span className="eyebrow">{gu ? 'સાઇટની ઝલક' : 'SITE OVERVIEW'}</span><h2>{gu ? 'દરેક સાઇટની કામગીરી' : 'Operations at each site'}</h2></div><span className="management-record-count">{data.sites.length} {gu ? 'સાઇટ' : 'sites'}</span></div><p className="management-panel-note">{gu ? 'ફરજની સંખ્યા હાજરીનો પુરાવો નથી. ફોટો મોકલનાર એટલે ઓછામાં ઓછો એક ફોટો મળ્યો.' : 'Scheduled duties show staffing plans. “With photos” means at least one photo received.'}</p><div className="management-site-grid">{data.sites.map((site) => <article className="management-site-tile" key={site.siteCode}><div className="management-site-tile-heading"><span className="management-section-icon"><MapPinned size={20}/></span><div><small>{site.siteCode}</small><h3>{site.siteName}</h3></div><span className={`management-coverage-badge ${site.shortage > 0 ? 'short' : 'covered'}`}>{site.shortage > 0 ? (gu ? `${site.shortage} ઓછા` : `${site.shortage} short`) : (gu ? 'શેડ્યૂલ પૂર્ણ' : 'Schedule filled')}</span></div><div className="management-site-staffing"><span>{gu ? 'નક્કી કરેલ / જરૂરી ફરજ' : 'Scheduled / required duties'}</span><strong>{site.rostered} / {site.expectedCoverage}</strong></div><progress max={Math.max(1,site.expectedCoverage)} value={Math.min(site.rostered,Math.max(1,site.expectedCoverage))} aria-label={gu ? 'ફરજનું શેડ્યૂલ' : 'Duty scheduling'}/><div className="management-site-metrics"><span>{gu ? 'સોંપેલ ગાર્ડ' : 'Assigned guards'}<b>{site.assignedGuards}</b></span><span>{gu ? 'ફોટો મોકલનાર' : 'With photos'}<b>{site.attendanceSubmitted}</b></span><span>{gu ? 'મળેલા ફોટો' : 'Received photos'}<b>{site.receivedPhotos}</b></span><span>{gu ? 'ચૂકેલા ફોટો' : 'Missed photos'}<b>{site.missedPhotos}</b></span></div><div className="management-site-footer"><AlertTriangle size={15}/><span>{site.openIncidents} {gu ? 'ખુલ્લી ઘટનાઓ' : 'open incidents'}</span></div></article>)}</div>{!data.sites.length && <div className="management-empty-inline"><MapPinned size={24}/><span>{gu ? 'કોઈ સાઇટ સોંપાઈ નથી.' : 'No sites assigned.'}</span></div>}</section>
+  </div>;
 }

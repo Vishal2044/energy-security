@@ -5,7 +5,7 @@ import { ensureCsrfCookie } from '../services/auth.js';
 
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 function sameOrigin(origin: string) {
-  return origin === env.clientUrl;
+  return env.clientOrigins.includes(origin);
 }
 
 export const requestSecurity: RequestHandler = (req, res, next) => {

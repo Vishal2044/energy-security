@@ -1,55 +1,31 @@
-# Documents, Payroll and Reporting
+# Documents, photo payroll and reporting
 
-## Implemented
+## Documents
 
-- Guard document self-upload remains multipart and Base64/attendance compatibility is untouched. Document records now optionally carry `status`, reviewer decision/reason, expiry, version chain, SHA-256 duplicate warning, masked document number, sensitivity and access timestamps.
-- Admin and assigned Main Security users can review document metadata, preview/download authorized files, review versions and run bounded bulk decisions. Guard uploads start as `PENDING`; only an authorized reviewer can approve or reject them.
-- Payroll uses integer paise arithmetic and explicit company inputs only. No statutory rate, holiday rule or allowance is inferred. Approved attendance (`verificationStatus=verified` or legacy `VERIFIED/CORRECTED`) is the payable attendance source; approved overtime is included when supplied.
-- New payroll workflow is `REVIEW -> APPROVED -> LOCKED -> PAID -> RECONCILED`. Locked/paid records cannot be silently corrected. Payment references and audit history are recorded. Payslips are private printable HTML so a browser can save/print PDF without adding a PDF dependency.
-- Added scoped CSV reports for payroll, documents, incidents and site coverage. Existing salary, attendance routes and historical fields remain available.
+Admin and Supervisors can add or replace documents for guards they are authorized to manage. Supervisors are constrained to their assigned sites in creation, edit, document lists and private file routes. Guards can view their own documents but cannot upload or change them.
 
-## API additions
+New manager-added documents have status APPROVED immediately. There is no document verification/rejection workflow. Legacy stored review fields are preserved for compatibility but are not exposed as current review tasks.
 
-```text
-POST  /guards/:id/documents
-GET   /documents?status=&search=&guardId=
-PATCH /documents/:id/review
-POST  /documents/bulk-review
-GET   /documents/:id/history
-POST  /payroll/preview
-POST  /payroll/run
-GET   /payroll
-PATCH /payroll/:id/approve|lock|pay|reconcile
-POST  /payroll/bulk-approve   (confirmation: APPROVE)
-GET   /payroll/:id/payslip
-POST  /guards/bulk-lifecycle
-GET   /reports/payroll.csv
-GET   /reports/documents.csv
-GET   /reports/incidents.csv
-GET   /reports/site-coverage.csv
-```
+## Photo payroll
 
-Payroll preview/run accepts `month`, `year`, optional `guardIds`, and an explicit `policy` object such as `{ "basicSalary": 18000, "overtimeRate": 120, "allowances": 500 }`. The policy is stored as a version label, not treated as legal/statutory configuration.
+The guard's configured day/night shift has four daily live-photo slots. Each accepted photo earns its configured rate; an expired slot without a photo earns zero. Worked-day, full-day, partial-day, absent-day, received-photo and missed-photo counts are derived from the same attendance ledger as earnings.
 
-## Configuration and installation
+The original legacy Salary collection remains intact. The new PhotoPayroll collection stores immutable credited-month snapshots and payment references. Until credited, photo salary is derived from the guard's effective-dated policies and received photos; no read endpoint writes payroll rows.
 
-No new dependency is required. Existing installation remains:
+API routes:
 
-```bash
-npm install
-```
+- GET /photo-payroll: scoped photo salary, counts and credited status.
+- POST /photo-payroll/credit/:id: Admin records a completed external payment and reference.
+- GET /photo-payroll/payslip/:id: private printable payslip for a credited record.
 
-Mongo deployments should create the new optional indexes from `server/models/index.ts` during the normal application startup/index lifecycle. No destructive migration is needed; old document and salary rows continue to read through legacy fields.
+A month remains open until 10:00 IST on the following month's first date, so its final night-shift photo can arrive. Open periods cannot be marked credited. A credited period cannot be paid twice or silently recalculated.
 
-## Verification checklist
+Previous salary records and their existing payment workflow remain under the historical-record section. Historical paid records are never overwritten by the new photo calculation.
 
-Run only with project-owner approval under repository execution policy:
+The app records company payment status; it does not execute or independently verify bank transfers.
 
-```bash
-npm run check
-npm run build
-```
+## Validation
 
-Manual checks should cover guard self-upload, rejected replacement, duplicate warning, expiry display, supervisor site scoping, payroll preview against approved attendance, invalid workflow transitions, locked correction rejection, private payslip access, bulk confirmation and CSV scope.
+Focused synthetic tests are tests/photo-duty.test.ts and tests/photo-duty-management.test.ts. They do not connect to MongoDB or write uploads. Production MongoDB indexes/concurrency, real phone camera access and payslip/payment smoke checks are still required. Build/typecheck commands require owner permission.
 
-The document hash is exact-file detection, not identity proof. Payroll is a calculation and approval record, not a bank transfer. Browser/device timestamps, images and operational records do not independently prove physical presence.
+Schema changes are additive. No destructive migration or automatic historical-rate backfill is run. Existing historical reports remain available; photo attendance and photo salary are shown in their dedicated pages.

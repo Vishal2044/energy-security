@@ -148,12 +148,14 @@ export function hammingDistance(left?: string, right?: string) {
   return distance;
 }
 
-export function analyzeAttendancePhoto(photo: string, _clientPerceptualHash?: string): AttendancePhotoAnalysis {
+export function analyzeAttendancePhoto(photo: string, _clientPerceptualHash?: string, requireCameraFrame = false): AttendancePhotoAnalysis {
   const { mimeType, buffer } = decodePhoto(photo);
   if (!buffer.length) throw new Error("INVALID_IMAGE_DATA");
   const dimensions = imageDimensions(buffer, mimeType);
+  if (requireCameraFrame && (mimeType !== 'image/jpeg' || buffer.length > 8 * 1024 * 1024 || !dimensions || dimensions.width < 160 || dimensions.height < 160 || dimensions.width > 1280 || dimensions.height > 1280)) throw new Error("INVALID_IMAGE_DATA");
   if (dimensions && (dimensions.width > 6000 || dimensions.height > 6000)) throw new Error("IMAGE_DIMENSIONS_INVALID");
   const raster = decodeRaster(buffer, mimeType);
+  if (requireCameraFrame && !raster) throw new Error("INVALID_IMAGE_DATA");
   return {
     photoHash: createHash("sha256").update(buffer).digest("hex"),
     photoPerceptualHash: perceptualHash(raster),

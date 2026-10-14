@@ -1,7 +1,7 @@
 import type { SessionUser } from './types.js';
 
 export const PERMISSIONS = [
-  'USER_CREATE', 'USER_DISABLE', 'USER_MANAGE', 'SITE_MANAGE',
+  'USER_CREATE', 'USER_DISABLE', 'USER_MANAGE', 'SITE_MANAGE', 'GUARD_MANAGE',
   'ATTENDANCE_VERIFY', 'SALARY_VIEW', 'SALARY_APPROVE',
   'DOCUMENT_DOWNLOAD', 'AUDIT_VIEW', 'REPORT_EXPORT',
   'OPERATIONS_VIEW', 'ATTENDANCE_SUBMIT', 'INCIDENT_MANAGE', 'NOTIFICATION_MANAGE',
@@ -11,7 +11,7 @@ export type Permission = (typeof PERMISSIONS)[number];
 
 const rolePermissions: Record<string, readonly Permission[]> = {
   ADMIN: PERMISSIONS,
-  MAIN_SECURITY: ['OPERATIONS_VIEW', 'ATTENDANCE_VERIFY', 'INCIDENT_MANAGE', 'NOTIFICATION_MANAGE', 'REPORT_EXPORT', 'PROFILE_VIEW', 'DOCUMENT_VIEW', 'DOCUMENT_DOWNLOAD'],
+  MAIN_SECURITY: ['OPERATIONS_VIEW', 'ATTENDANCE_VERIFY', 'USER_CREATE', 'GUARD_MANAGE', 'SALARY_VIEW', 'INCIDENT_MANAGE', 'NOTIFICATION_MANAGE', 'REPORT_EXPORT', 'PROFILE_VIEW', 'DOCUMENT_VIEW', 'DOCUMENT_DOWNLOAD'],
   GUARD: ['OPERATIONS_VIEW', 'ATTENDANCE_SUBMIT', 'SALARY_VIEW', 'PROFILE_VIEW', 'DOCUMENT_VIEW', 'DOCUMENT_DOWNLOAD'],
 };
 
@@ -30,6 +30,15 @@ export function canAccessSite(user: SessionUser | undefined, siteId?: string): b
 }
 
 export type OwnedResource = { guardId?: string; userId?: string; siteId?: string };
+
+/** Managers may maintain guards only inside their assigned sites. */
+export function canManageGuard(user: SessionUser | undefined, resource: OwnedResource): boolean {
+  return hasPermission(user, 'GUARD_MANAGE') && canAccessSite(user, resource.siteId);
+}
+
+export function canReadDocument(user: SessionUser | undefined, resource: OwnedResource): boolean {
+  return canReadOwnedPrivate(user, resource) || canManageGuard(user, resource);
+}
 
 export function ownsResource(user: SessionUser | undefined, resource: OwnedResource): boolean {
   if (!user?.id || !permissionsFor(user.role).length) return false;

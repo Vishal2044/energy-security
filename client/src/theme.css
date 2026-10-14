@@ -1,0 +1,85 @@
+/* Electric Sand: shared by login, management and Guard. Fonts are precached PWA assets. */
+@font-face {
+  font-family: 'DM Sans'; font-style: normal; font-weight: 100 1000; font-display: swap;
+  src: url('/fonts/dm-sans-variable.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Manrope'; font-style: normal; font-weight: 200 800; font-display: swap;
+  src: url('/fonts/manrope-variable.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Noto Sans Gujarati'; font-style: normal; font-weight: 100 900; font-display: swap;
+  src: url('/fonts/noto-sans-gujarati-variable.ttf') format('truetype');
+}
+
+:root {
+  color-scheme: light;
+  --primary: #6D4AFF;
+  --primary-hover: #5838E6;
+  --primary-pressed: #4729C7;
+  --primary-soft: #EEE9FF;
+  --primary-foreground: #FFFFFF;
+  --coral: #FF8066;
+  --sand: #FFCC9B;
+  --canvas: #F8F5F1;
+  --surface: #FFFFFF;
+  --surface-subtle: #F1ECF2;
+  --surface-elevated: #FFFFFF;
+  --text: #262035;
+  --text-secondary: #62596D;
+  --border: #E8E1E9;
+  --focus: #6D4AFF;
+  --success: #166A48; --success-soft: #E5F6EC;
+  --warning: #89500B; --warning-soft: #FFF0D1;
+  --danger: #B23C4A; --danger-soft: #FDECEF;
+  --info: #5635C5; --info-soft: #EEE9FF;
+  --neutral: #62596D; --neutral-soft: #F1ECF2;
+  --on-brand: #FFFFFF;
+  --hero-panel: rgb(38 32 53 / 86%);
+  --overlay: rgb(23 20 31 / 64%);
+  --shadow-color: 38 32 53;
+  --shadow-sm: 0 2px 8px rgb(var(--shadow-color) / 4%);
+  --shadow: 0 8px 24px rgb(var(--shadow-color) / 5%);
+  --shadow-lg: 0 20px 64px rgb(var(--shadow-color) / 16%);
+  --gradient-brand: linear-gradient(125deg, #6D4AFF 0%, #A76DFF 55%, #FF9B7B 100%);
+  --gradient-soft: linear-gradient(120deg, #FFF3E9 0%, #F2EAFE 100%);
+  --gradient-primary-action: linear-gradient(135deg, #6D4AFF 0%, #5838E6 100%);
+  --font-body: 'DM Sans', 'Noto Sans Gujarati', system-ui, sans-serif;
+  --font-heading: 'Manrope', 'Noto Sans Gujarati', system-ui, sans-serif;
+  --font-numeric: 'Manrope', 'Noto Sans Gujarati', system-ui, sans-serif;
+  --body-size: 15px; --body-leading: 1.55;
+  --label-size: 13px; --small-size: 12px;
+  --page-size: 28px; --display-size: 34px; --kpi-size: 32px;
+  --heading-tracking: -.025em;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-8: 32px;
+  --radius-control: 12px; --radius-card: 16px; --radius-dialog: 20px;
+  --duration-control: 180ms; --duration-card: 220ms;
+  font-family: var(--font-body); font-synthesis: none;
+  color: var(--text); background: var(--canvas);
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+  --primary: #A78BFA; --primary-hover: #C0AEFF; --primary-pressed: #A78BFA;
+  --primary-soft: #34294D; --primary-foreground: #17141F;
+  --canvas: #17141F; --surface: #24202E; --surface-subtle: #302A3B; --surface-elevated: #302A3B;
+  --text: #F7F2FC; --text-secondary: #B6ADBF; --border: #393343;
+  --focus: #A78BFA; --coral: #FF9C85; --sand: #EFC49E;
+  --success: #80D8AB; --success-soft: #173B2D;
+  --warning: #F3C77C; --warning-soft: #48351E;
+  --danger: #FFA2AD; --danger-soft: #49242E;
+  --info: #C0AEFF; --info-soft: #34294D;
+  --neutral: #C7BECE; --neutral-soft: #302A3B;
+  --shadow-color: 0 0 0;
+  --gradient-brand: linear-gradient(125deg, #302445 0%, #4A3267 60%, #794B65 100%);
+  --gradient-soft: linear-gradient(120deg, #24202E 0%, #302A3B 100%);
+  --gradient-primary-action: linear-gradient(135deg, #A78BFA 0%, #C0AEFF 100%);
+}
+
+:root:lang(gu) {
+  --font-body: 'Noto Sans Gujarati', 'DM Sans', system-ui, sans-serif;
+  --font-heading: 'Noto Sans Gujarati', 'Manrope', system-ui, sans-serif;
+  --body-size: 16px; --body-leading: 1.65; --page-size: 26px;
+  --display-size: 30px; --heading-tracking: 0;
+}

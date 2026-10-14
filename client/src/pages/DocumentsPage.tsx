@@ -1,0 +1,65 @@
+import { Fragment, useId, useState } from 'react';
+import { ChevronDown, ChevronUp, FileText, FolderOpen, UploadCloud, Users, X } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api, currentApiSession, getData } from '../lib/api';
+import { Dropdown, EmptyState, ErrorState, LoadingState, PageHeader, SearchBox, StatusBadge, UserAvatar, UserIdentity } from '../components/ui';
+import { translateValue, useLanguage } from '../locales/runtime';
+
+type GuardDetails = { id: string; mobile?: string; village?: string; employmentStatus?: string; profilePhotoUrl?: string; assignedSiteDetails?: { siteCode: string; siteName: string } };
+type DocumentItem = { id: string; guardId?: string; guard?: string; employeeCode?: string; guardDetails?: GuardDetails; type: string; originalName?: string; previewUrl?: string };
+type DocumentGroup = { guardId?: string; guard?: string; employeeCode?: string; details?: GuardDetails; documents: DocumentItem[] };
+
+function DocumentUploadPanel() {
+  const gu = useLanguage() === 'gu';
+  const client = useQueryClient();
+  const inputId = useId();
+  const [guardId, setGuardId] = useState('');
+  const [type, setType] = useState('AADHAAR');
+  const [file, setFile] = useState<File>();
+  const [message, setMessage] = useState('');
+  const [fileError, setFileError] = useState('');
+  const [fileVersion, setFileVersion] = useState(0);
+  const guards = useQuery({ queryKey: ['document-upload-guards', currentApiSession()], queryFn: ({ signal }) => getData<{ guards: { id: string; name: string; employeeCode: string }[] }>('/guards', undefined, signal) });
+  const upload = useMutation({ mutationFn: () => { const body = new FormData(); body.append('file', file!); body.append('type', type); return api.post(`/guards/${guardId}/documents`, body); }, onSuccess: () => { setFile(undefined); setFileVersion((version) => version + 1); setMessage(gu ? 'દસ્તાવેજ ઉમેરાઈ ગયો.' : 'Document added successfully.'); void client.invalidateQueries({ queryKey: ['documents-review'] }); void client.invalidateQueries({ queryKey: ['guard-documents'] }); void client.invalidateQueries({ queryKey: ['guards'] }); void client.invalidateQueries({ queryKey: ['profile'] }); } });
+  const options = guards.data?.guards.map((guard) => ({ value: guard.id, label: guard.name, description: guard.employeeCode })) ?? [];
+  const types = [['AADHAAR', 'Aadhaar', 'આધાર'], ['BANK_PASSBOOK', 'Bank passbook', 'બેંક પાસબુક'], ['PHOTO', 'Photo', 'ફોટો'], ['PAN', 'PAN', 'પાન'], ['ADDRESS_PROOF', 'Address proof', 'સરનામાનો પુરાવો'], ['OTHER', 'Other', 'અન્ય']];
+  const resetFile = () => { setFile(undefined); setFileError(''); setFileVersion((version) => version + 1); };
+  const canUpload = Boolean(guardId && options.some((option) => option.value === guardId) && file && !fileError && !guards.isError && !guards.isLoading && !upload.isPending);
+  return <section className="panel documents-upload-panel">
+    <div className="documents-section-heading"><span className="documents-section-icon" aria-hidden="true"><UploadCloud size={22}/></span><div><span className="eyebrow">{gu ? 'દસ્તાવેજ ઉમેરો' : 'ADD A DOCUMENT'}</span><h2>{gu ? 'ગાર્ડના રેકોર્ડમાં ઉમેરો' : 'Add to a guard’s records'}</h2><p>{gu ? 'ગાર્ડ અને પ્રકાર પસંદ કરો, પછી પહેલેથી મંજૂર થયેલો દસ્તાવેજ ઉમેરો.' : 'Choose a guard and document type, then add the already-approved document.'}</p></div></div>
+    {guards.isError && <ErrorState onRetry={() => void guards.refetch()} message={gu ? 'ગાર્ડ લાવી શકાયા નથી.' : 'Guards could not be loaded.'}/>}
+    <form className="documents-upload-form" onSubmit={(event) => { event.preventDefault(); setMessage(''); if (canUpload) upload.mutate(); }}>
+      <div className="documents-upload-fields"><div className="documents-field"><span>{gu ? 'ગાર્ડ' : 'Guard'}</span><Dropdown required value={guardId} onChange={(value) => { setGuardId(value); resetFile(); setMessage(''); upload.reset(); }} options={options} disabled={guards.isLoading || guards.isError || upload.isPending} placeholder={guards.isLoading ? (gu ? 'ગાર્ડ લાવવામાં આવી રહ્યા છે…' : 'Loading guards…') : (gu ? 'ગાર્ડ પસંદ કરો' : 'Choose a guard')} /></div><div className="documents-field"><span>{gu ? 'દસ્તાવેજનો પ્રકાર' : 'Document type'}</span><Dropdown required value={type} onChange={(value) => { setType(value); setMessage(''); upload.reset(); }} options={types.map(([value, en, label]) => ({ value, label: gu ? label : en }))} disabled={upload.isPending} placeholder={gu ? 'પ્રકાર પસંદ કરો' : 'Choose document type'}/></div></div>
+      {!guards.isLoading && !guards.isError && !options.length && <p className="documents-inline-note">{gu ? 'દસ્તાવેજ ઉમેરવા પહેલાં ગાર્ડની પ્રોફાઇલ બનાવો.' : 'Create a guard profile before adding documents.'}</p>}
+      <label className={`documents-file-picker${file ? ' has-file' : ''}${upload.isPending ? ' disabled' : ''}`} htmlFor={inputId}><UploadCloud size={26} aria-hidden="true"/><strong>{file ? (gu ? 'દસ્તાવેજ પસંદ થયો' : 'Document selected') : (gu ? 'દસ્તાવેજ પસંદ કરો' : 'Choose your document')}</strong><span>{gu ? 'ફોટો અથવા PDF · વધુમાં વધુ 8 MB' : 'Image or PDF · up to 8 MB'}</span><span className="documents-file-button">{file ? (gu ? 'ફાઇલ બદલો' : 'Change file') : (gu ? 'ફાઇલ પસંદ કરો' : 'Browse files')}</span><input id={inputId} key={fileVersion} className="documents-file-input" type="file" accept="image/*,.pdf" required disabled={upload.isPending} aria-describedby={`${inputId}-help`} onChange={(event) => { const next = event.target.files?.[0]; setMessage(''); upload.reset(); if (next && next.size > 8 * 1024 * 1024) { setFile(undefined); setFileError(gu ? '8 MB અથવા તેનાથી નાની ફાઇલ પસંદ કરો.' : 'Choose a file of 8 MB or smaller.'); } else { setFile(next); setFileError(''); } }}/></label>
+      {file && <div className="documents-selected-file"><FileText size={20} aria-hidden="true"/><span><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toLocaleString('en-IN', { maximumFractionDigits: 2 })} MB</small></span><button type="button" disabled={upload.isPending} onClick={resetFile} aria-label={gu ? 'ફાઇલ દૂર કરો' : 'Remove selected file'}><X size={18}/></button></div>}
+      <div className="documents-upload-footer"><p id={`${inputId}-help`}>{gu ? 'દસ્તાવેજ ગાર્ડની સુરક્ષિત પ્રોફાઇલમાં ઉમેરાશે.' : 'The document will be added to the guard’s secure profile.'}</p><button type="submit" className="button primary" disabled={!canUpload}><UploadCloud size={17}/>{upload.isPending ? (gu ? 'ઉમેરાઈ રહ્યું છે…' : 'Adding…') : (gu ? 'દસ્તાવેજ ઉમેરો' : 'Add document')}</button></div>
+      {fileError && <p className="error-callout" role="alert">{fileError}</p>}{upload.isError && <p role="alert" className="error-callout">{gu ? 'દસ્તાવેજ ઉમેરાયો નથી. ફાઇલ તપાસો અને ફરી પ્રયાસ કરો.' : 'Document could not be added. Check the file and retry.'}</p>}{message && <p className="documents-success" role="status">{message}</p>}
+    </form>
+  </section>;
+}
+
+export function DocumentsPage() {
+  const language = useLanguage();
+  const gu = language === 'gu';
+  const [expandedGuard, setExpandedGuard] = useState<string>();
+  const [search, setSearch] = useState('');
+  const documents = useQuery({ queryKey: ['documents-review', currentApiSession()], queryFn: ({ signal }) => getData<{ documents: DocumentItem[] }>('/documents', undefined, signal) });
+  const groups = new Map<string, DocumentGroup>();
+  for (const document of documents.data?.documents ?? []) {
+    const key = document.guardId ?? document.employeeCode ?? document.id;
+    const group = groups.get(key);
+    if (group) group.documents.push(document);
+    else groups.set(key, { guardId: document.guardId, guard: document.guard, employeeCode: document.employeeCode, details: document.guardDetails, documents: [document] });
+  }
+  const term = search.trim().toLocaleLowerCase();
+  const rows = Array.from(groups).filter(([, group]) => [group.guard, group.employeeCode, group.details?.mobile, group.details?.village, group.details?.assignedSiteDetails?.siteCode, group.details?.assignedSiteDetails?.siteName, ...group.documents.map((document) => document.originalName)].join(' ').toLocaleLowerCase().includes(term));
+  return <div className="documents-workspace">
+    <PageHeader eyebrow="SECURE RECORDS" title={gu ? 'દસ્તાવેજો' : 'Documents'} description={gu ? 'ગાર્ડ પ્રમાણે ગોઠવાયેલા દસ્તાવેજો. જુઓ પર ક્લિક કરીને પ્રિવ્યૂ ખોલો.' : 'Documents organized by guard. Expand a record to preview its files.'}/>
+    {documents.data && !documents.isError && <div className="documents-summary"><div><span className="documents-section-icon"><FolderOpen size={22}/></span><span>{gu ? 'સાચવેલા દસ્તાવેજો' : 'Stored documents'}<strong>{documents.data.documents.length}</strong></span></div><div><span className="documents-section-icon"><Users size={22}/></span><span>{gu ? 'દસ્તાવેજો ધરાવતા ગાર્ડ' : 'Guards with documents'}<strong>{groups.size}</strong></span></div></div>}
+    <DocumentUploadPanel/>
+    <section className="documents-library"><div className="documents-library-heading"><div><span className="eyebrow">{gu ? 'દસ્તાવેજોની યાદી' : 'DOCUMENT LIBRARY'}</span><h2>{gu ? 'ગાર્ડ પ્રમાણે રેકોર્ડ' : 'Records by guard'}</h2></div><SearchBox value={search} onChange={setSearch} placeholder={gu ? 'નામ, કોડ, સાઇટ અથવા ફાઇલ શોધો…' : 'Search name, code, site or file…'}/></div>
+      {documents.isLoading ? <LoadingState/> : documents.isError ? <ErrorState onRetry={() => void documents.refetch()}/> : <section className="panel table-panel documents-table-panel"><table><thead><tr><th>{gu ? 'ગાર્ડ' : 'Guard'}</th><th>{gu ? 'કર્મચારી કોડ' : 'Employee code'}</th><th>{gu ? 'મોબાઇલ' : 'Mobile'}</th><th>{gu ? 'સાઇટ' : 'Site'}</th><th>{gu ? 'ગામ' : 'Village'}</th><th>{gu ? 'સ્થિતિ' : 'Status'}</th><th aria-label={gu ? 'દસ્તાવેજો જુઓ' : 'View documents'}/></tr></thead><tbody>{rows.map(([key, group]) => <Fragment key={key}><tr className={expandedGuard === key ? 'documents-row-open' : ''}><td><div className="documents-guard-info">{group.details?.id || group.guardId ? <UserIdentity id={group.details?.id ?? group.guardId ?? ''} name={group.guard ?? (gu ? 'અજ્ઞાત ગાર્ડ' : 'Unknown guard')} photoUrl={group.details?.profilePhotoUrl} meta={gu ? `${group.documents.length} દસ્તાવેજો` : `${group.documents.length} documents`}/> : <div className="user-identity"><UserAvatar name={group.guard ?? '?'}/><strong>{group.guard ?? (gu ? 'અજ્ઞાત ગાર્ડ' : 'Unknown guard')}</strong></div>}</div></td><td><code>{group.employeeCode || '—'}</code></td><td>{group.details?.mobile || '—'}</td><td><div className="guard-site-cell">{group.details?.assignedSiteDetails ? <><strong>{group.details.assignedSiteDetails.siteCode || '—'}</strong><span>{group.details.assignedSiteDetails.siteName}</span></> : <span>{gu ? 'ઉપલબ્ધ નથી' : 'Unavailable'}</span>}</div></td><td>{group.details?.village || '—'}</td><td>{group.details?.employmentStatus ? <StatusBadge value={group.details.employmentStatus}/> : '—'}</td><td className="documents-view-cell"><button type="button" className="button small secondary" aria-expanded={expandedGuard === key} aria-controls={`guard-documents-${key}`} aria-label={`${gu ? 'દસ્તાવેજો જુઓ' : 'View documents'}: ${group.guard ?? group.employeeCode ?? ''}`} onClick={() => setExpandedGuard(expandedGuard === key ? undefined : key)}>{expandedGuard === key ? (gu ? 'બંધ કરો' : 'Close') : (gu ? 'જુઓ' : 'View')}{expandedGuard === key ? <ChevronUp size={17}/> : <ChevronDown size={17}/>}</button></td></tr>{expandedGuard === key && <tr className="documents-expanded-row"><td colSpan={7}><div className="documents-expanded-heading"><FolderOpen size={18}/><strong>{gu ? 'ગાર્ડના દસ્તાવેજો' : 'Guard documents'}</strong><span>{group.documents.length}</span></div><div className="documents-tab-list" id={`guard-documents-${key}`} aria-label={gu ? 'દસ્તાવેજો' : 'Documents'}>{group.documents.map((document) => { const label = translateValue(document.type, language).replaceAll('_', ' '); const content = <><FileText size={20}/><span><strong>{label}</strong>{document.originalName && <small>{document.originalName}</small>}<small className="documents-preview-label">{document.previewUrl ? (gu ? 'પ્રિવ્યૂ ખોલો ↗' : 'Open preview ↗') : (gu ? 'પ્રિવ્યૂ ઉપલબ્ધ નથી' : 'Preview unavailable')}</small></span></>; return document.previewUrl ? <a className="documents-tab" key={document.id} href={document.previewUrl} target="_blank" rel="noreferrer" aria-label={`${gu ? 'પ્રિવ્યૂ' : 'Preview'}: ${label}${document.originalName ? ` · ${document.originalName}` : ''}`}>{content}</a> : <div className="documents-tab unavailable" key={document.id}>{content}</div>; })}</div></td></tr>}</Fragment>)}</tbody></table>{!rows.length && <EmptyState title={term ? (gu ? 'કોઈ મેળ ખાતા રેકોર્ડ નથી' : 'No matching records') : (gu ? 'કોઈ દસ્તાવેજો નથી' : 'No documents')} description={term ? (gu ? 'અલગ નામ, કોડ અથવા સાઇટ શોધો.' : 'Try another name, code or site.') : (gu ? 'ઉમેરેલા દસ્તાવેજો અહીં દેખાશે.' : 'Added documents will appear here.')} icon={<FolderOpen/>}/>}</section>}
+    </section>
+  </div>;
+}

@@ -1,9 +1,9 @@
 export const ROLES = ['GUARD', 'MAIN_SECURITY', 'ADMIN'] as const;
 export type Role = (typeof ROLES)[number];
 
-export const ATTENDANCE_TYPES = ['SHIFT_START', 'RANDOM_VERIFICATION', 'SHIFT_END'] as const;
+export const ATTENDANCE_TYPES = ['SHIFT_START', 'RANDOM_VERIFICATION', 'SHIFT_END', 'DUTY_PHOTO'] as const;
 export type AttendanceType = (typeof ATTENDANCE_TYPES)[number];
-export type AttendanceStatus = 'VERIFIED' | 'PENDING_SYNC' | 'MISSED' | 'MANUAL_REVIEW' | 'REJECTED' | 'CORRECTED';
+export type AttendanceStatus = 'RECORDED' | 'VERIFIED' | 'PENDING_SYNC' | 'MISSED' | 'MANUAL_REVIEW' | 'REJECTED' | 'CORRECTED';
 export type ApiErrorDetail = { field: string; message: string };
 export type ApiError = {
   success: false;

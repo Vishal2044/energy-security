@@ -37,4 +37,4 @@ api.interceptors.response.use((response) => response, async (error: AxiosError<P
   if (error.response?.status === 401 && !isAuthEndpoint && config?.dgSessionGeneration === sessionGeneration && typeof window !== 'undefined') window.dispatchEvent(new Event('dg-session-expired'));
   return Promise.reject(new ApiRequestError(data?.error ?? 'SERVER_ERROR', data?.details, error.response?.status));
 });
-export async function getData<T>(url: string, params?: Record<string, string | number | undefined>) { const response = await api.get<{ success: boolean; data: T }>(url, { params }); return response.data.data; }
+export async function getData<T>(url: string, params?: Record<string, string | number | undefined>, signal?: AbortSignal) { const response = await api.get<{ success: boolean; data: T }>(url, { params, signal }); return response.data.data; }

@@ -1,21 +1,4 @@
-import { useState } from 'react';
-import { CheckCircle2, Circle, Clock3, ChevronRight, Image as ImageIcon, X } from 'lucide-react';
-import { useQuery } from '@tanstack/react-query';
-import { getData } from '../../lib/api';
-import { guardCopy } from '../../locales/guard';
-import { translateValue, useLanguage } from '../../locales/runtime';
-import type { AttendanceRecord, Shift } from './types';
-
-function formatDay(value: string, language: 'en' | 'gu') { return new Date(value).toLocaleDateString(language === 'gu' ? 'gu-IN' : 'en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }); }
-function formatTime(value: string, language: 'en' | 'gu') { return new Date(value).toLocaleTimeString(language === 'gu' ? 'gu-IN' : 'en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }); }
-
-function AttendanceEvidence({ item, onPreview }: { item: AttendanceRecord; onPreview: (photo: string) => void }) {
-  const language = useLanguage();
-  return <div className="guard-attendance-evidence"><div><strong>{translateValue(item.type, language)}</strong><span>{formatTime(item.capturedAt, language)} · {translateValue(item.status, language)}</span></div>{item.photo ? <button type="button" className="guard-attendance-photo" onClick={(event) => { event.stopPropagation(); onPreview(item.photo!); }} aria-label={language === 'gu' ? 'હાજરી ફોટો જુઓ' : 'Preview attendance photo'}><img src={item.photo} alt={language === 'gu' ? 'હાજરીનો પુરાવો' : 'Attendance evidence'} /></button> : <span className="guard-attendance-photo-missing"><ImageIcon size={16} /></span>}</div>;
-}
-
-export function GuardAttendancePage() {
-  const language = useLanguage(); const copy = guardCopy[language]; const [selected, setSelected] = useState<string>(); const [preview, setPreview] = useState<string>();
-  const shifts = useQuery({ queryKey: ['guard-shifts'], queryFn: () => getData<{ shifts: Shift[] }>('/shifts/mine') }); const history = useQuery({ queryKey: ['guard-attendance'], queryFn: () => getData<{ attendance: AttendanceRecord[] }>('/attendance/history') }); const items = shifts.data?.shifts ?? [];
-  return <div className="guard-list-page"><div className="guard-page-title"><div><span className="eyebrow">ELECTOR</span><h1>{copy.myAttendance}</h1></div></div><div className="guard-month-summary"><strong>{items.filter((item) => item.status === 'COMPLETED').length}</strong><span>{language === 'gu' ? 'પૂર્ણ ફરજો' : 'Completed duties'}</span></div>{shifts.isLoading && <div className="guard-loading">{copy.loading}</div>}{!shifts.isLoading && !items.length && <div className="guard-empty">{copy.noRecords}</div>}<div className="guard-shift-list">{items.map((shift) => <article className={`guard-shift-card ${selected === shift.id ? 'open' : ''}`} key={shift.id} onClick={() => setSelected(selected === shift.id ? undefined : shift.id)}><div className="guard-shift-row"><div className="guard-shift-icon">{shift.status === 'COMPLETED' ? <CheckCircle2 /> : <Circle />}</div><div><strong>{formatDay(shift.startedAt, language)}</strong><span>{translateValue(shift.status, language)}</span></div><ChevronRight size={19} /></div>{selected === shift.id && <div className="guard-timeline">{(shift.attendance ?? []).map((item) => <div className="guard-timeline-row" key={item.id}><span className="timeline-line" /><span className="timeline-icon"><CheckCircle2 size={16} /></span><AttendanceEvidence item={item} onPreview={setPreview} /></div>)}</div>}</article>)}{!items.length && history.data?.attendance.map((item) => <article className="guard-shift-card" key={item.id}><div className="guard-shift-row"><div className="guard-shift-icon"><Clock3 /></div><div><strong>{formatDay(item.capturedAt, language)}</strong><span>{translateValue(item.type, language)} · {formatTime(item.capturedAt, language)}</span></div></div><AttendanceEvidence item={item} onPreview={setPreview} /></article>)}</div>{preview && <div className="image-dialog-backdrop" role="presentation" onClick={() => setPreview(undefined)}><section className="image-dialog guard-attendance-dialog" role="dialog" aria-modal="true" aria-label={language === 'gu' ? 'હાજરી ફોટો પૂર્વાવલોકન' : 'Attendance photo preview'} onClick={(event) => event.stopPropagation()}><button type="button" className="image-dialog-close" onClick={() => setPreview(undefined)} aria-label={language === 'gu' ? 'બંધ કરો' : 'Close preview'}><X size={18} /></button><img src={preview} alt={language === 'gu' ? 'હાજરીનો પુરાવો' : 'Attendance evidence preview'} /></section></div>}</div>;
-}
+import { GuardDutyOverview } from '../../components/guard/GuardDutyOverview';
+import { HistoricalAttendanceRecords } from '../../components/attendance/HistoricalAttendanceRecords';
+import { useLanguage } from '../../locales/runtime';
+export function GuardAttendancePage() { const gu = useLanguage() === 'gu'; return <><GuardDutyOverview/><details className="panel guard-history-panel"><summary>{gu ? 'અગાઉના હાજરી રેકોર્ડ' : 'Previous attendance records'}</summary><HistoricalAttendanceRecords/></details></>; }

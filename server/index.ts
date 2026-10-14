@@ -15,7 +15,7 @@ import { requestSecurity } from './middleware/security.js';
 
 const app = express();
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-app.use(cors({ origin: (origin, callback) => callback(null, !origin || origin === env.clientUrl), credentials: true }));
+app.use(cors({ origin: (origin, callback) => callback(null, !origin || env.clientOrigins.includes(origin)), credentials: true }));
 app.use(express.json({ limit: '12mb' }));
 app.use(cookieParser());
 app.use(requestSecurity);

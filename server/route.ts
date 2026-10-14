@@ -1,3 +1,7 @@
+import { photoDutyRouter } from './photoDutyRoutes.js';
+import { newPhotoPolicy, guardPolicies } from './services/photoDuty.js';
+import { mongoPage, memoryPage, requestedPage } from './services/pagination.js';
+import { paginationFor } from '../shared/pagination.js';
 import express from "express";
 import multer from "multer";
 import { z } from "zod";
@@ -63,7 +67,7 @@ import { deliverPushToUser } from "./services/push.js";
 import { createNotification, createNotifications } from "./services/notifications.js";
 import { ROLES, type AttendanceType } from "../shared/types.js";
 import { attendancePayloadSchema, MAX_ATTENDANCE_PHOTO_BASE64_LENGTH, type AttendancePayload } from "../shared/attendance.js";
-import { canAccessSite, canReadOperational, canReadOwnedPrivate, canReadPrivate } from "../shared/permissions.js";
+import { canAccessSite, canReadOperational, canReadOwnedPrivate, canReadPrivate, canManageGuard, canReadDocument } from "../shared/permissions.js";
 import { indiaBusinessDate, indiaDayUtcRange } from "../shared/time.js";
 import { createAuthorizationMiddleware } from "./authorization/middleware.js";
 import { matchRoutePolicy, type ResourceKind } from "./authorization/routes.js";
@@ -126,7 +130,7 @@ const publicAttendances = (values: any[]) => values.map(publicAttendance);
 const safeGuard = (guard: any, viewer?: SessionUser) => {
   const item = object(guard);
   const { profilePhoto, ...safeItem } = item;
-  if (viewer?.role === "MAIN_SECURITY") return {
+  if (viewer?.role === "MAIN_SECURITY" && !canManageGuard(viewer, { siteId: item.assignedSite })) return {
     id: item.id, employeeCode: item.employeeCode, name: item.name, nameGujarati: item.nameGujarati,
     mobile: item.mobile, assignedSite: item.assignedSite, employmentStatus: item.employmentStatus,
     profilePhotoUrl: profilePhoto ? `/api/guards/${item.id}/photo` : undefined,
@@ -384,6 +388,7 @@ router.use((req, res, next) => {
   return requireAuth(req, res, next);
 });
 router.use(createAuthorizationMiddleware({ loadResource: loadAuthorizationResource, audit: recordAudit }));
+router.use(photoDutyRouter);
 function generatedGuardEmail(employeeCode: string) {
   return `guard.${employeeCode.toLowerCase().replace(/[^a-z0-9]+/g, ".")}@dgenergy.local`;
 }
@@ -411,10 +416,10 @@ router.get("/users/:id/access-history", requireAuth, async (req, res, next) => {
     const target: any = usingMongo() ? await UserModel.findById(id) : db.users.find((item) => item.id === id);
     if (!target) return res.status(404).json({ success: false, error: "USER_NOT_FOUND" });
     const actions = ["ACCESS_CHANGE_REQUESTED", "ACCESS_CHANGED", "TEAM_MEMBER_UPDATED", "TEAM_MEMBER_CREATED", "GUARD_CREATED", "USER_CREATED", "PASSWORD_CHANGED"];
-    const entries = usingMongo()
-      ? await AuditLogModel.find({ entityType: "User", entityId: id, action: { $in: actions } }).sort({ at: -1 }).limit(100)
-      : db.audits.filter((item) => item.entityType === "User" && item.entityId === id && actions.includes(item.action)).slice(0, 100);
-    return res.json({ success: true, data: { history: objects(entries) } });
+    const page = requestedPage(req.query);
+    const filter = { entityType: "User", entityId: id, action: { $in: actions } };
+    const result = usingMongo() ? await mongoPage(AuditLogModel, filter, { at: -1, _id: -1 }, page, 100) : memoryPage(db.audits.filter((item) => item.entityType === "User" && item.entityId === id && actions.includes(item.action)).slice().sort((a,b) => new Date(b.at).getTime() - new Date(a.at).getTime() || b.id.localeCompare(a.id)), page, 100);
+    return res.json({ success: true, data: { history: objects(result.records), ...(result.pagination ? { pagination: result.pagination } : {}) } });
   } catch (error) { return next(error); }
 });
 
@@ -665,17 +670,15 @@ router.get(
   requireRoles("ADMIN"),
   async (_req, res, next) => {
     try {
-      const users = usingMongo()
-        ? await UserModel.find().sort({ role: 1, name: 1 })
-        : db.users
-            .slice()
-            .sort(
-              (a, b) =>
-                a.role.localeCompare(b.role) || a.name.localeCompare(b.name),
-            );
+      const page = requestedPage(_req.query);
+      const filter = _req.query.role ? { role: String(_req.query.role) } : {};
+      const result = usingMongo()
+        ? await mongoPage(UserModel, filter, { role: 1, name: 1, _id: 1 }, page)
+        : memoryPage(db.users.filter((user) => !filter.role || user.role === filter.role).slice().sort((a,b) => a.role.localeCompare(b.role) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id)), page);
+      const users = result.records;
       return res.json({
         success: true,
-        data: { users: users.map(safeTeamUser) },
+        data: { users: users.map(safeTeamUser), ...(result.pagination ? { pagination: result.pagination } : {}) },
       });
     } catch (error) {
       return next(error);
@@ -686,7 +689,7 @@ router.get(
 router.get(
   "/users/next-employee-code",
   requireAuth,
-  requireRoles("ADMIN"),
+  requireRoles("ADMIN", "MAIN_SECURITY"),
   async (_req, res, next) => {
     try {
       return res.json({
@@ -702,7 +705,7 @@ router.get(
 router.post(
   "/users",
   requireAuth,
-  requireRoles("ADMIN"),
+  requireRoles("ADMIN", "MAIN_SECURITY"),
   upload.fields([
     { name: "userPhoto", maxCount: 1 },
     { name: "aadharDocument", maxCount: 1 },
@@ -726,6 +729,8 @@ router.post(
           confirmPassword: z.string().min(6).max(128),
           assignedSite: z.string().optional(),
           monthlySalary: z.coerce.number().nonnegative().optional(),
+          dutyShift: z.enum(["DAY", "NIGHT"]).optional(),
+          photoRate: z.coerce.number().finite().min(0).max(100000).multipleOf(0.01).optional(),
         })
         .safeParse(req.body);
       if (!parsed.success)
@@ -740,6 +745,10 @@ router.post(
         return res
           .status(400)
           .json({ success: false, error: "PASSWORD_MISMATCH" });
+      if (req.user?.role === "MAIN_SECURITY" && (parsed.data.role !== "GUARD" || !canAccessSite(req.user, parsed.data.assignedSite))) return res.status(403).json({ success: false, error: "FORBIDDEN" });
+      if (parsed.data.role === "GUARD" && (!parsed.data.assignedSite || !parsed.data.dutyShift || parsed.data.photoRate === undefined)) return res.status(400).json({ success: false, error: "GUARD_PHOTO_POLICY_REQUIRED" });
+      if (parsed.data.assignedSite && (await findSite(parsed.data.assignedSite))?.status !== "ACTIVE") return res.status(400).json({ success: false, error: "SITE_NOT_FOUND" });
+      const photoPolicy = parsed.data.assignedSite && parsed.data.dutyShift && parsed.data.photoRate !== undefined ? { dutyShift: parsed.data.dutyShift, photoRate: parsed.data.photoRate, photoPolicyHistory: newPhotoPolicy({ siteId: parsed.data.assignedSite, shiftType: parsed.data.dutyShift, photoRate: parsed.data.photoRate }) } : {};
       const employeeCode =
         parsed.data.role === "GUARD" ? await nextEmployeeCode() : undefined;
       const email = parsed.data.email.toLowerCase();
@@ -799,7 +808,8 @@ router.post(
               village: "",
               district: "Devbhumi Dwarka",
               employmentStatus: "ACTIVE",
-              monthlySalary: parsed.data.monthlySalary ?? 24000,
+              monthlySalary: parsed.data.monthlySalary ?? 0,
+              ...photoPolicy,
               preferredLanguage: "gu",
               documentCount: savedUploads.length,
               bank,
@@ -848,6 +858,7 @@ router.post(
                 size: saved.size,
                 uploadedBy: req.user?.id ?? "",
                 uploadedAt: new Date(),
+                status: "APPROVED",
               })),
             );
           await recordAudit(
@@ -894,7 +905,8 @@ router.post(
               district: "Devbhumi Dwarka",
               assignedSite: parsed.data.assignedSite || undefined,
               employmentStatus: "ACTIVE" as const,
-              monthlySalary: parsed.data.monthlySalary ?? 24000,
+              monthlySalary: parsed.data.monthlySalary ?? 0,
+              ...photoPolicy,
               preferredLanguage: "gu" as const,
               documentCount: savedUploads.length,
               profilePhoto: savedUploads.find(
@@ -940,6 +952,7 @@ router.post(
           size: saved.size,
           uploadedBy: req.user?.id ?? "",
           uploadedAt: new Date().toISOString(),
+          status: "APPROVED" as const,
         }),
       );
       audit(
@@ -1012,26 +1025,15 @@ router.get("/profiles/:id", requireAuth, async (req, res, next) => {
     if (!guard && user.role === "GUARD" && user.guardId) guard = await findGuard(String(user.guardId));
     const userId = String(user.id ?? user._id);
     const guardId = guard ? String(guard.id ?? guard._id) : "";
-    const privateProfile = canReadPrivate(req.user, { userId, guardId });
+    const privateProfile = canReadPrivate(req.user, { userId, guardId, siteId: guard?.assignedSite });
     const assignedSite = guard?.assignedSite
       ? await findSite(String(guard.assignedSite))
       : undefined;
     const assignedSiteObject = assignedSite ? object(assignedSite) : undefined;
-    const documents = !privateProfile ? [] : usingMongo()
-      ? (await DocumentModel.find(
-          guardId ? { guardId } : { userId },
-        ))
-          .map((item: any) => object(item))
-          .map(({ storageKey, ...item }: any) => ({
-            ...item,
-            previewUrl: `/api/documents/${item.id}/preview`,
-          }))
-      : db.documents.filter(
-          (item) => Boolean(guardId && item.guardId === guardId) || item.userId === userId,
-        ).map(({ storageKey, ...item }: any) => ({
-          ...item,
-          previewUrl: `/api/documents/${item.id}/preview`,
-        }));
+    const page = requestedPage(req.query);
+    const documentFilter = guardId ? { guardId } : { userId };
+    const documentResult = !privateProfile ? { records: [] as any[], pagination: undefined } : usingMongo() ? await mongoPage(DocumentModel, documentFilter, { uploadedAt: -1, _id: -1 }, page) : memoryPage(db.documents.filter((item) => Boolean(guardId && item.guardId === guardId) || item.userId === userId).slice().sort((a,b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime() || b.id.localeCompare(a.id)), page);
+    const documents = documentResult.records.map((item: any) => { const { storageKey, ...value } = object(item); return { ...value, previewUrl: `/api/documents/${value.id}/preview` }; });
     if (!privateProfile) return res.json({ success: true, data: {
       scope: "OPERATIONS_ONLY",
       user: { ...safeTeamUser(user), email: "", assignedSiteIds: [], accessRevision: undefined },
@@ -1075,10 +1077,13 @@ router.get("/profiles/:id", requireAuth, async (req, res, next) => {
           assignedSiteName: assignedSiteObject?.siteName ?? "",
           joiningDate: guard?.joiningDate ?? "",
           monthlySalary: guard?.monthlySalary ?? undefined,
+          dutyShift: guard?.dutyShift,
+          photoRate: guard?.photoRate,
           preferredLanguage: user.preferredLanguage ?? guard?.preferredLanguage ?? "en",
           employmentStatus: guard?.employmentStatus ?? (user.active === false ? "INACTIVE" : "ACTIVE"),
         },
         documents,
+        ...(documentResult.pagination ? { pagination: documentResult.pagination } : {}),
       },
     });
   } catch (error) {
@@ -1380,6 +1385,7 @@ router.get(
   requireRoles("MAIN_SECURITY", "ADMIN"),
   async (req, res, next) => {
     try {
+      const page = requestedPage(req.query);
       const query = String(req.query.search ?? "").trim();
       const site = String(req.query.site ?? "");
       const status = String(req.query.status ?? "");
@@ -1415,10 +1421,12 @@ router.get(
             .filter((key) => key !== undefined && key !== null && key !== "")
             .forEach((key) => siteLookup.set(String(key), details));
         });
-        const guards = await GuardModel.find(filter).sort({ name: 1 });
+        const result = await mongoPage(GuardModel, filter, { name: 1, _id: 1 }, page);
+        const guards = result.records;
         return res.json({
           success: true,
           data: {
+            ...(result.pagination ? { pagination: result.pagination } : {}),
             guards: guards.map((guard) =>
               withAssignedSiteDetails(guard, siteLookup, req.user),
             ),
@@ -1440,10 +1448,7 @@ router.get(
           .filter((key) => key !== undefined && key !== null && key !== "")
           .forEach((key) => siteLookup.set(String(key), details));
       });
-      return res.json({
-        success: true,
-        data: {
-          guards: db.guards
+      const memoryRecords = db.guards
             .filter(
               (guard) =>
                 visibleGuard(req, guard) && (!lower ||
@@ -1451,7 +1456,12 @@ router.get(
                 (!site || guard.assignedSite === site) &&
                 (!status || guard.employmentStatus === status),
             )
-            .map((guard) => withAssignedSiteDetails(guard, siteLookup, req.user)),
+            .map((guard) => withAssignedSiteDetails(guard, siteLookup, req.user));
+      const result = memoryPage(memoryRecords.sort((a: any,b: any) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)), page);
+      return res.json({
+        success: true,
+        data: {
+          guards: result.records, ...(result.pagination ? { pagination: result.pagination } : {}),
         },
       });
     } catch (error) {
@@ -1494,9 +1504,9 @@ router.get("/guards/:id", requireAuth, async (req, res, next) => {
     const guard: any = await findGuard(id);
     if (!guard)
       return res.status(404).json({ success: false, error: "GUARD_NOT_FOUND" });
-    const privateGuard = canReadPrivate(req.user, { guardId: id });
+    const privateGuard = canReadPrivate(req.user, { guardId: id }) || canManageGuard(req.user, { siteId: guard.assignedSite });
     const user: any =
-      req.user?.role === "ADMIN" ? await findUserForGuard(id) : undefined;
+      (req.user?.role === "ADMIN" || canManageGuard(req.user, { siteId: guard.assignedSite })) ? await findUserForGuard(id) : undefined;
     const profile = user
       ? {
           email: user.email,
@@ -1518,7 +1528,7 @@ router.get("/guards/:id", requireAuth, async (req, res, next) => {
         data: {
           guard: safeGuard(guard, req.user),
           profile,
-          documents: objects(documents).map(({ storageKey, ...item }) => item),
+          documents: objects(documents).map(({ storageKey, ...item }) => ({ ...item, status: "APPROVED" })),
           attendance: publicAttendances(attendance),
           salary: objects(salary),
         },
@@ -1569,7 +1579,7 @@ router.get("/guards/:id/salary", requireAuth, async (req, res, next) => {
 router.post(
   "/guards",
   requireAuth,
-  requireRoles("ADMIN"),
+  requireRoles("ADMIN", "MAIN_SECURITY"),
   async (req, res, next) => {
     try {
       const parsed = z
@@ -1580,6 +1590,8 @@ router.post(
           email: z.string().email().optional(),
           assignedSite: z.string().optional(),
           monthlySalary: z.number().optional(),
+          dutyShift: z.enum(["DAY", "NIGHT"]).optional(),
+          photoRate: z.coerce.number().finite().min(0).max(100000).multipleOf(0.01).optional(),
           temporaryPassword: z.string().min(6).max(128).optional(),
           joiningDate: z.string().datetime().optional(),
           employmentType: z.enum(["FULL_TIME", "PART_TIME", "CONTRACT"]).optional(),
@@ -1598,6 +1610,10 @@ router.post(
         });
       if (!parsed.success)
         return res.status(400).json({ success: false, error: "INVALID_GUARD" });
+      if (req.user?.role === "MAIN_SECURITY" && (!canAccessSite(req.user, parsed.data.assignedSite))) return res.status(403).json({ success: false, error: "FORBIDDEN" });
+      if ((!parsed.data.assignedSite || !parsed.data.dutyShift || parsed.data.photoRate === undefined)) return res.status(400).json({ success: false, error: "GUARD_PHOTO_POLICY_REQUIRED" });
+      if (parsed.data.assignedSite && (await findSite(parsed.data.assignedSite))?.status !== "ACTIVE") return res.status(400).json({ success: false, error: "SITE_NOT_FOUND" });
+      const photoPolicy = parsed.data.assignedSite && parsed.data.dutyShift && parsed.data.photoRate !== undefined ? { dutyShift: parsed.data.dutyShift, photoRate: parsed.data.photoRate, photoPolicyHistory: newPhotoPolicy({ siteId: parsed.data.assignedSite, shiftType: parsed.data.dutyShift, photoRate: parsed.data.photoRate }) } : {};
       const email = (
         parsed.data.email ?? generatedGuardEmail(parsed.data.employeeCode)
       ).toLowerCase();
@@ -1628,7 +1644,8 @@ router.post(
             village: req.body.village ?? "",
             district: req.body.district ?? "Devbhumi Dwarka",
             employmentStatus: "ACTIVE",
-            monthlySalary: parsed.data.monthlySalary ?? 24000,
+            monthlySalary: parsed.data.monthlySalary ?? 0,
+              ...photoPolicy,
             preferredLanguage: "gu",
             documentCount: 0,
             bank: { bankName: "", accountNumber: "XXXXXXXX", ifscCode: "" },
@@ -1705,7 +1722,8 @@ router.post(
         district: req.body.district ?? "Devbhumi Dwarka",
         assignedSite: parsed.data.assignedSite,
         employmentStatus: "ACTIVE",
-        monthlySalary: parsed.data.monthlySalary ?? 24000,
+        monthlySalary: parsed.data.monthlySalary ?? 0,
+              ...photoPolicy,
         preferredLanguage: "gu",
         documentCount: 0,
         bank: { bankName: "", accountNumber: "XXXXXXXX", ifscCode: "" },
@@ -1755,7 +1773,7 @@ router.post(
 router.patch(
   "/guards/:id",
   requireAuth,
-  requireRoles("ADMIN"),
+  requireRoles("ADMIN", "MAIN_SECURITY"),
   upload.fields([
     { name: "userPhoto", maxCount: 1 },
     { name: "aadharDocument", maxCount: 1 },
@@ -1777,6 +1795,8 @@ router.patch(
           ifscCode: z.string().min(4).or(z.literal("")).optional(),
           assignedSite: z.string().optional(),
           monthlySalary: z.coerce.number().nonnegative().optional(),
+          dutyShift: z.enum(["DAY", "NIGHT"]).optional(),
+          photoRate: z.coerce.number().finite().min(0).max(100000).multipleOf(0.01).optional(),
           employmentStatus: z.enum(["ACTIVE", "INACTIVE"]).optional(),
           joiningDate: z.string().datetime().optional(),
           employmentType: z.enum(["FULL_TIME", "PART_TIME", "CONTRACT"]).optional(),
@@ -1799,6 +1819,16 @@ router.patch(
             error: "INVALID_GUARD_PROFILE",
             details: validationDetails(parsed.error),
           });
+      const scopedGuard: any = await findGuard(id);
+      if (!scopedGuard || !canManageGuard(req.user, { siteId: scopedGuard.assignedSite })) return res.status(403).json({ success: false, error: "FORBIDDEN" });
+      if (parsed.data.assignedSite && (!canAccessSite(req.user, parsed.data.assignedSite) || (await findSite(parsed.data.assignedSite))?.status !== "ACTIVE")) return res.status(403).json({ success: false, error: "FORBIDDEN" });
+      if (parsed.data.assignedSite === "") return res.status(403).json({ success: false, error: "FORBIDDEN" });
+      const nextShift = parsed.data.dutyShift ?? scopedGuard.dutyShift;
+      const nextRate = parsed.data.photoRate ?? scopedGuard.photoRate;
+      const nextSite = parsed.data.assignedSite ?? scopedGuard.assignedSite;
+      const nextActive = (parsed.data.employmentStatus ?? scopedGuard.employmentStatus) === "ACTIVE";
+      const policyChanged = nextShift !== scopedGuard.dutyShift || nextRate !== scopedGuard.photoRate || nextSite !== scopedGuard.assignedSite || nextActive !== (scopedGuard.employmentStatus === "ACTIVE") || !guardPolicies(scopedGuard).length;
+      const photoPolicyPatch = nextShift && nextRate !== undefined && nextSite && policyChanged ? { dutyShift: nextShift, photoRate: nextRate, photoPolicyHistory: newPhotoPolicy({ shiftType: nextShift, photoRate: nextRate, siteId: nextSite, active: nextActive }, new Date(), guardPolicies(scopedGuard)) } : {};
       const files = req.files as
         | { [fieldname: string]: Express.Multer.File[] }
         | undefined;
@@ -1837,6 +1867,7 @@ router.patch(
           : {}),
       };
       const guardPatch: Record<string, unknown> = {
+        ...photoPolicyPatch,
         ...(parsed.data.name !== undefined
           ? { name: parsed.data.name, nameGujarati: parsed.data.name }
           : {}),
@@ -1929,6 +1960,7 @@ router.patch(
                 size: saved.size,
                 uploadedBy: req.user?.id ?? "",
                 uploadedAt: new Date(),
+                status: "APPROVED",
               },
             },
             { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -2002,6 +2034,7 @@ router.patch(
           size: saved.size,
           uploadedBy: req.user?.id ?? "",
           uploadedAt: new Date().toISOString(),
+          status: "APPROVED" as const,
         };
         if (existing) Object.assign(existing, value);
         else db.documents.unshift({ id: newId("doc"), ...value });
@@ -2154,15 +2187,12 @@ router.post(
 router.get("/sites", requireAuth, async (req, res, next) => {
   try {
     const guard: any = await guardForUser(req.user);
-    const sites = usingMongo()
-      ? await SiteModel.find(
-          req.user?.role === "GUARD" ? { _id: { $in: guard?.assignedSite ? [guard.assignedSite] : [] } }
-            : req.user?.role === "MAIN_SECURITY" ? { _id: { $in: req.user.assignedSiteIds ?? [] } } : {},
-        )
-      : req.user?.role === "GUARD"
-        ? db.sites.filter((site) => site.id === guard?.assignedSite)
-        : db.sites.filter((site) => canAccessSite(req.user, site.id));
-    return res.json({ success: true, data: { sites: objects(sites) } });
+    const page = requestedPage(req.query);
+    const filter = req.user?.role === "GUARD" ? { _id: { $in: guard?.assignedSite ? [guard.assignedSite] : [] } } : req.user?.role === "MAIN_SECURITY" ? { _id: { $in: req.user.assignedSiteIds ?? [] } } : {};
+    const result = usingMongo()
+      ? await mongoPage(SiteModel, filter, { siteCode: 1, _id: 1 }, page)
+      : memoryPage(db.sites.filter((site) => req.user?.role === "GUARD" ? site.id === guard?.assignedSite : canAccessSite(req.user, site.id)).slice().sort((a,b) => a.siteCode.localeCompare(b.siteCode) || a.id.localeCompare(b.id)), page);
+    return res.json({ success: true, data: { sites: objects(result.records), ...(result.pagination ? { pagination: result.pagination } : {}) } });
   } catch (error) {
     return next(error);
   }
@@ -2440,16 +2470,18 @@ router.get("/rosters", requireAuth, async (req, res, next) => {
       if (!validBusinessDate(from) || !validBusinessDate(to) || from > to) return res.status(400).json({ success: false, error: "INVALID_ROSTER_DATE_RANGE" });
       filter.businessDate = { $gte: from, $lte: to };
     }
-    const records: any[] = usingMongo()
-      ? await RosterModel.find(filter).sort({ startAt: 1 })
-      : db.rosters.filter((item) => visibleOperation(req, item) && (!requestedGuard || item.guardId === requestedGuard) && (!requestedSite || item.siteId === requestedSite) && (!filter.businessDate || item.businessDate >= filter.businessDate.$gte && item.businessDate <= filter.businessDate.$lte)).sort((a, b) => new Date(a.startAt).getTime() - new Date(b.startAt).getTime());
+    const page = requestedPage(req.query);
+    const result = usingMongo()
+      ? await mongoPage(RosterModel, filter, { startAt: 1, _id: 1 }, page)
+      : memoryPage(db.rosters.filter((item) => visibleOperation(req, item) && (!requestedGuard || item.guardId === requestedGuard) && (!requestedSite || item.siteId === requestedSite) && (!filter.businessDate || item.businessDate >= filter.businessDate.$gte && item.businessDate <= filter.businessDate.$lte)).sort((a, b) => new Date(a.startAt).getTime() - new Date(b.startAt).getTime()), page);
+    const records: any[] = result.records;
     const guardIds = [...new Set(records.map((item) => String(item.guardId)))];
     const siteIds = [...new Set(records.map((item) => String(item.siteId)))];
     const guards: any[] = usingMongo() ? await GuardModel.find({ _id: { $in: guardIds } }) : db.guards.filter((item) => guardIds.includes(item.id));
     const sites: any[] = usingMongo() ? await SiteModel.find({ _id: { $in: siteIds } }) : db.sites.filter((item) => siteIds.includes(item.id));
     const guardMap = new Map(guards.map((item) => [recordId(item), item.name]));
     const siteMap = new Map(sites.map((item) => [recordId(item), { siteCode: item.siteCode, siteName: item.siteName }]));
-    return res.json({ success: true, data: { rosters: records.map((item) => ({ ...object(item), guardName: guardMap.get(String(item.guardId)), site: siteMap.get(String(item.siteId)) })) } });
+    return res.json({ success: true, data: { ...(result.pagination ? { pagination: result.pagination } : {}), rosters: records.map((item) => ({ ...object(item), guardName: guardMap.get(String(item.guardId)), site: siteMap.get(String(item.siteId)) })) } });
   } catch (error) { return next(error); }
 });
 
@@ -2602,539 +2634,6 @@ router.get("/operations/dashboard", requireAuth, requireRoles("MAIN_SECURITY", "
   } catch (error) { return next(error); }
 });
 
-router.post(
-  "/attendance/:kind",
-  requireAuth,
-  requireRoles("GUARD"),
-  async (req, res, next) => {
-    try {
-      const kind = routeParam(req.params.kind);
-      const type = (
-        {
-          start: "SHIFT_START",
-          verify: "RANDOM_VERIFICATION",
-          end: "SHIFT_END",
-        } as Record<string, AttendanceType>
-      )[kind];
-      console.info("[attendance] request received", {
-        kind,
-        userId: req.user?.id,
-        guardId: req.user?.guardId,
-      });
-      if (!type)
-        return res
-          .status(404)
-          .json({ success: false, error: "INVALID_ATTENDANCE_TYPE" });
-      const guard: any = await guardForUser(req.user);
-      const guardId = guard?._id ?? guard?.id;
-      if (guard?.employmentStatus === "INACTIVE") return res.status(403).json({ success: false, error: "FORBIDDEN" });
-      if (!guardId || !guard?.assignedSite)
-        return res
-          .status(400)
-          .json({ success: false, error: "NO_ASSIGNED_SITE" });
-      const site: any = await findSite(String(guard.assignedSite));
-      if (!site)
-        return res
-          .status(400)
-          .json({ success: false, error: "SITE_NOT_FOUND" });
-      if (typeof req.body?.photo === "string" && req.body.photo.length > MAX_ATTENDANCE_PHOTO_BASE64_LENGTH)
-        return res.status(413).json({ success: false, error: "ATTENDANCE_IMAGE_TOO_LARGE" });
-      const parsedPayload = parseAttendancePayload(req);
-      if (!parsedPayload.success)
-        return res
-          .status(400)
-          .json({
-            success: false,
-            error: "INVALID_ATTENDANCE_PAYLOAD",
-            details: validationDetails(parsedPayload.error),
-          });
-      const payload: AttendancePayload = parsedPayload.data;
-      const verificationRequestId = String(
-        req.body.verificationRequestId ?? "",
-      );
-      if (usingMongo() && payload.clientRecordId) {
-        const existing = await AttendanceModel.findOne({
-          clientRecordId: payload.clientRecordId,
-        });
-        if (existing && (String(existing.guardId) !== String(guardId) || existing.type !== type || existing.photo !== payload.photo ||
-          (type === "RANDOM_VERIFICATION" && String(existing.verificationRequestId ?? "") !== verificationRequestId)))
-          return res.status(409).json({ success: false, error: "CLIENT_RECORD_CONFLICT" });
-        if (existing)
-          return res.json({
-            success: true,
-            data: { attendance: publicAttendance(existing), duplicate: true },
-          });
-      }
-      if (!usingMongo() && payload.clientRecordId) {
-        const existing = db.attendance.find(
-          (item) => item.clientRecordId === payload.clientRecordId,
-        );
-        if (existing && (String(existing.guardId) !== String(guardId) || existing.type !== type || existing.photo !== payload.photo ||
-          (type === "RANDOM_VERIFICATION" && String(existing.verificationRequestId ?? "") !== verificationRequestId)))
-          return res.status(409).json({ success: false, error: "CLIENT_RECORD_CONFLICT" });
-        if (existing)
-          return res.json({
-            success: true,
-            data: { attendance: publicAttendance(existing), duplicate: true },
-          });
-      }
-      const active: any = await findActiveShift(String(guardId));
-      if (type === "SHIFT_START" && active)
-        return res
-          .status(409)
-          .json({ success: false, error: "SHIFT_ALREADY_ACTIVE" });
-      if (type !== "SHIFT_START" && !active)
-        return res
-          .status(409)
-          .json({ success: false, error: "NO_ACTIVE_SHIFT" });
-      let verification: any;
-      if (type === "RANDOM_VERIFICATION") {
-        if (!verificationRequestId)
-          return res
-            .status(400)
-            .json({ success: false, error: "VERIFICATION_REQUEST_REQUIRED" });
-        verification = usingMongo()
-          ? await VerificationRequestModel.findById(verificationRequestId)
-          : db.verifications.find((item) => item.id === verificationRequestId);
-        const currentSiteId = recordId(site);
-        const activeShiftId = recordId(active);
-        if (
-          !verification ||
-          String(verification.guardId) !== String(guardId) ||
-          String(verification.siteId) !== currentSiteId ||
-          String(verification.shiftId ?? activeShiftId) !== activeShiftId
-        )
-          return res
-            .status(403)
-            .json({ success: false, error: "VERIFICATION_NOT_ALLOWED" });
-        if (verification.status === "VERIFIED")
-          return res
-            .status(409)
-            .json({ success: false, error: "VERIFICATION_ALREADY_COMPLETED" });
-        if (verification.status === "SUBMITTED")
-          return res
-            .status(409)
-            .json({ success: false, error: "VERIFICATION_ALREADY_SUBMITTED" });
-        if (new Date(verification.expiresAt).getTime() <= Date.now()) {
-          if (usingMongo()) {
-            verification.status = "EXPIRED";
-            await verification.save();
-          } else verification.status = "EXPIRED";
-          return res
-            .status(410)
-            .json({ success: false, error: "VERIFICATION_EXPIRED" });
-        }
-      }
-      // Uploading an image only submits evidence. A privileged reviewer must
-      // explicitly verify it from the management attendance screen.
-      const status = "MANUAL_REVIEW" as const;
-      const receivedAt = new Date();
-      const capturedAt = receivedAt;
-      let evidence: Awaited<ReturnType<typeof analyzeAttendanceEvidence>>;
-      try {
-        evidence = await analyzeAttendanceEvidence(payload.photo, payload.perceptualHash, String(guardId), String(site._id ?? site.id), receivedAt);
-      } catch (error) {
-        if (error instanceof Error && ["INVALID_IMAGE_DATA", "IMAGE_DIMENSIONS_INVALID"].includes(error.message)) return res.status(400).json({ success: false, error: "INVALID_ATTENDANCE_IMAGE" });
-        throw error;
-      }
-      if (usingMongo()) {
-        const persistMongoAttendance = async (dbSession?: any) => {
-          const activeQuery = ShiftModel.findOne({ guardId, status: "ACTIVE" }).sort({ startedAt: -1 });
-          const activeInTransaction: any = dbSession ? await activeQuery.session(dbSession) : await activeQuery;
-          if (type === "SHIFT_START" && activeInTransaction) throw new Error("SHIFT_ALREADY_ACTIVE");
-          if (type !== "SHIFT_START" && !activeInTransaction) throw new Error("NO_ACTIVE_SHIFT");
-          const verificationInTransaction: any = type === "RANDOM_VERIFICATION" && verificationRequestId
-            ? (dbSession ? await VerificationRequestModel.findById(verificationRequestId).session(dbSession) : await VerificationRequestModel.findById(verificationRequestId))
-            : undefined;
-          if (type === "RANDOM_VERIFICATION" && (!verificationInTransaction || verificationInTransaction.status === "SUBMITTED" || verificationInTransaction.status === "VERIFIED")) throw new Error("VERIFICATION_ALREADY_SUBMITTED");
-          let createdAttendance: any;
-          let createdShiftId: string | undefined;
-          try {
-            const created = await AttendanceModel.create([{
-              _id: makeId("att"), clientRecordId: payload.clientRecordId, guardId, siteId: site._id,
-              shiftId: activeInTransaction?._id, type, status, verificationStatus: "needs_review", capturedAt,
-              capturedAtClient: payload.capturedAt ? new Date(payload.capturedAt) : undefined, receivedAt,
-              photo: payload.photo, verificationRequestId: type === "RANDOM_VERIFICATION" ? verificationRequestId : undefined,
-              notes: payload.notes, ...evidence.analysis, reviewFlags: evidence.flags,
-              similarPhotoMatches: evidence.similarMatches, reviewDueAt: evidence.reviewDueAt,
-              clientQueuedAt: payload.clientQueuedAt ? new Date(payload.clientQueuedAt) : undefined,
-            }], dbSession ? { session: dbSession } : undefined);
-            createdAttendance = created[0];
-            if (type === "SHIFT_START") {
-              const createdShift: any = await ShiftModel.create([{
-                _id: makeId("shift"), guardId, siteId: site._id, startedAt: capturedAt,
-                status: "ACTIVE", startAttendanceId: createdAttendance._id, verificationCount: 0,
-              }], dbSession ? { session: dbSession } : undefined);
-              createdShiftId = recordId(createdShift[0]);
-              createdAttendance.shiftId = createdShift[0]._id;
-              await createdAttendance.save(dbSession ? { session: dbSession } : undefined);
-            }
-            if (type === "RANDOM_VERIFICATION") {
-              verificationInTransaction.status = "SUBMITTED";
-              verificationInTransaction.shiftId = recordId(activeInTransaction);
-              verificationInTransaction.verificationSubmittedAt = new Date();
-              verificationInTransaction.notificationStatus = "SUBMITTED";
-              await verificationInTransaction.save(dbSession ? { session: dbSession } : undefined);
-            }
-            if (type === "SHIFT_END") {
-              const completed = await ShiftModel.findOneAndUpdate({ _id: activeInTransaction._id, status: "ACTIVE" }, { $set: { status: "COMPLETED", endedAt: capturedAt, endAttendanceId: createdAttendance._id } }, dbSession ? { session: dbSession, new: true } : { new: true });
-              if (!completed) throw new Error("NO_ACTIVE_SHIFT");
-            }
-            return createdAttendance;
-          } catch (error) {
-            if (!dbSession && createdAttendance?._id) await AttendanceModel.deleteOne({ _id: createdAttendance._id });
-            if (!dbSession && createdShiftId) await ShiftModel.deleteOne({ _id: createdShiftId });
-            throw error;
-          }
-        };
-        const session = await AttendanceModel.db.startSession();
-        let attendance: any;
-        try {
-          try {
-            await session.withTransaction(async () => { attendance = await persistMongoAttendance(session); });
-          } catch (error) {
-            if (!/Transaction numbers are only allowed|transactions are not supported|replica set/i.test(String((error as any)?.message ?? ""))) throw error;
-            attendance = await persistMongoAttendance();
-          }
-        } finally {
-          await session.endSession();
-        }
-        return res
-          .status(201)
-          .json({ success: true, data: { attendance: publicAttendance(attendance) } });
-      }
-      const attendance: AttendanceRecord = {
-        id: newId("att"),
-        clientRecordId: payload.clientRecordId,
-        guardId: String(guardId),
-        siteId: site.id,
-        shiftId: active?.id,
-        type,
-        status,
-        verificationStatus: "needs_review",
-        capturedAt: capturedAt.toISOString(),
-        capturedAtClient: payload.capturedAt,
-        receivedAt: receivedAt.toISOString(),
-        photo: payload.photo,
-        verificationRequestId:
-          type === "RANDOM_VERIFICATION" ? verificationRequestId : undefined,
-        notes: payload.notes,
-        ...evidence.analysis,
-        reviewFlags: evidence.flags,
-        similarPhotoMatches: evidence.similarMatches,
-        reviewDueAt: evidence.reviewDueAt.toISOString(),
-        clientQueuedAt: payload.clientQueuedAt,
-      };
-      if (type === "SHIFT_START" && db.shifts.some((item) => item.guardId === String(guardId) && item.status === "ACTIVE")) return res.status(409).json({ success: false, error: "SHIFT_ALREADY_ACTIVE" });
-      if (type !== "SHIFT_START" && (!active || !db.shifts.some((item) => item.id === active.id && item.status === "ACTIVE"))) return res.status(409).json({ success: false, error: "NO_ACTIVE_SHIFT" });
-      db.attendance.unshift(attendance);
-      if (type === "SHIFT_START") {
-        const shift: ShiftRecord = {
-          id: newId("shift"),
-          guardId: String(guardId),
-          siteId: site.id,
-          startedAt: capturedAt.toISOString(),
-          status: "ACTIVE",
-          startAttendanceId: attendance.id,
-          verificationCount: 0,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        db.shifts.unshift(shift);
-        attendance.shiftId = shift.id;
-      }
-      if (type === "RANDOM_VERIFICATION") {
-        verification.status = "SUBMITTED";
-        verification.shiftId = active.id;
-        verification.verificationSubmittedAt = new Date().toISOString();
-        verification.notificationStatus = "SUBMITTED";
-      }
-      if (type === "SHIFT_END") {
-        active.status = "COMPLETED";
-        active.endedAt = capturedAt.toISOString();
-        active.endAttendanceId = attendance.id;
-        active.updatedAt = new Date().toISOString();
-      }
-      return res.status(201).json({ success: true, data: { attendance: publicAttendance(attendance) } });
-    } catch (error) {
-      console.error("[attendance] request crashed");
-      if (error instanceof Error && ["SHIFT_ALREADY_ACTIVE", "NO_ACTIVE_SHIFT", "VERIFICATION_ALREADY_SUBMITTED"].includes(error.message)) return res.status(error.message === "NO_ACTIVE_SHIFT" ? 409 : 409).json({ success: false, error: error.message });
-      if ((error as any)?.code === 11000) {
-        const fields = Object.keys((error as any).keyPattern ?? (error as any).keyValue ?? {});
-        return res.status(409).json({ success: false, error: fields.includes("clientRecordId") ? "CLIENT_RECORD_CONFLICT" : fields.includes("guardId") && fields.includes("status") ? "SHIFT_ALREADY_ACTIVE" : "DUPLICATE_RECORD" });
-      }
-      return next(error);
-    }
-  },
-);
-
-router.patch(
-  "/attendance/:id/verify",
-  requireAuth,
-  requireRoles("MAIN_SECURITY", "ADMIN"),
-  async (req, res, next) => {
-    try {
-      const id = routeParam(req.params.id);
-      const attendance: any = usingMongo()
-        ? await AttendanceModel.findOne({ _id: id, ...operationalFilter(req) })
-        : db.attendance.find((item) => item.id === id && visibleOperation(req, item));
-      if (!attendance)
-        return res
-          .status(404)
-          .json({ success: false, error: "ATTENDANCE_NOT_FOUND" });
-      if (attendance.status === "VERIFIED")
-        return res.json({
-          success: true,
-          data: { attendance: publicAttendance(attendance), alreadyVerified: true },
-        });
-      if (attendance.status !== "MANUAL_REVIEW")
-        return res
-          .status(409)
-          .json({ success: false, error: "ATTENDANCE_NOT_REVIEWABLE" });
-
-      const verifiedAt = new Date();
-      const reviewerId = String(req.user?.id ?? "");
-      const guardId = String(attendance.guardId);
-      const siteId = String(attendance.siteId);
-      if (usingMongo()) {
-        attendance.status = "VERIFIED";
-        attendance.verificationStatus = "verified";
-        attendance.verifiedAt = verifiedAt;
-        attendance.verifiedBy = reviewerId;
-        await attendance.save();
-
-        if (attendance.type === "RANDOM_VERIFICATION" && attendance.verificationRequestId) {
-          const verification: any = await VerificationRequestModel.findOne({
-            _id: attendance.verificationRequestId, guardId, siteId,
-            ...(attendance.shiftId ? { $or: [{ shiftId: attendance.shiftId }, { shiftId: { $exists: false } }] } : {}),
-          });
-          if (verification && verification.status !== "VERIFIED") {
-            verification.status = "VERIFIED";
-            verification.verificationSubmittedAt =
-              verification.verificationSubmittedAt ?? verifiedAt;
-            verification.notificationStatus = "VERIFIED";
-            await verification.save();
-            if (attendance.shiftId)
-              await ShiftModel.updateOne(
-                { _id: attendance.shiftId, guardId, siteId },
-                { $inc: { verificationCount: 1 } },
-              );
-          }
-        }
-        const guard: any = await findGuard(guardId);
-        const site: any = await findSite(siteId);
-        await recordAudit(
-          reviewerId,
-          "ATTENDANCE_VERIFIED",
-          "Attendance",
-          String(attendance._id),
-          { guardId, siteId, type: attendance.type },
-        );
-        await ActivityModel.create({
-          _id: makeId("activity"),
-          title: "Attendance verified",
-          detail: `${guard?.name ?? "Guard"} - ${site?.siteCode ?? "Site"}`,
-          kind: "attendance",
-          at: verifiedAt,
-        });
-        return res.json({ success: true, data: { attendance: publicAttendance(attendance) } });
-      }
-
-      attendance.status = "VERIFIED";
-      attendance.verificationStatus = "verified";
-      attendance.verifiedAt = verifiedAt.toISOString();
-      attendance.verifiedBy = reviewerId;
-      if (attendance.type === "RANDOM_VERIFICATION" && attendance.verificationRequestId) {
-        const verification = db.verifications.find(
-          (item) => item.id === attendance.verificationRequestId && item.guardId === guardId && item.siteId === siteId &&
-            (!attendance.shiftId || !item.shiftId || item.shiftId === attendance.shiftId),
-        );
-        if (verification && verification.status !== "VERIFIED") {
-          verification.status = "VERIFIED";
-          verification.verificationSubmittedAt ??= verifiedAt.toISOString();
-          verification.notificationStatus = "VERIFIED";
-          const shift = db.shifts.find((item) => item.id === attendance.shiftId && item.guardId === guardId && item.siteId === siteId);
-          if (shift) shift.verificationCount += 1;
-        }
-      }
-      audit(reviewerId, "ATTENDANCE_VERIFIED", "Attendance", attendance.id, {
-        guardId,
-        siteId,
-        type: attendance.type,
-      });
-      addActivity(
-        "Attendance verified",
-        `${db.guards.find((item) => item.id === guardId)?.name ?? "Guard"} - ${db.sites.find((item) => item.id === siteId)?.siteCode ?? "Site"}`,
-        "attendance",
-      );
-      return res.json({ success: true, data: { attendance: publicAttendance(attendance) } });
-    } catch (error) {
-      return next(error);
-    }
-  },
-);
-
-router.patch("/attendance/:id/reject", requireAuth, requireRoles("MAIN_SECURITY", "ADMIN"), async (req, res, next) => {
-  try {
-    const id = routeParam(req.params.id);
-    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
-    if (reason.length < 3 || reason.length > 500) return res.status(400).json({ success: false, error: "REJECTION_REASON_REQUIRED" });
-    const attendance: any = usingMongo()
-      ? await AttendanceModel.findOne({ _id: id, ...operationalFilter(req) })
-      : db.attendance.find((item) => item.id === id && visibleOperation(req, item));
-    if (!attendance) return res.status(404).json({ success: false, error: "ATTENDANCE_NOT_FOUND" });
-    if (attendance.status !== "MANUAL_REVIEW") return res.status(409).json({ success: false, error: "ATTENDANCE_NOT_REVIEWABLE" });
-    const rejectedAt = new Date();
-    if (usingMongo()) {
-      attendance.status = "REJECTED";
-      attendance.verificationStatus = "rejected";
-      attendance.rejectionReason = reason;
-      attendance.verifiedBy = String(req.user!.id);
-      attendance.verifiedAt = rejectedAt;
-      await attendance.save();
-      if (attendance.type === "RANDOM_VERIFICATION" && attendance.verificationRequestId) await VerificationRequestModel.findByIdAndUpdate(attendance.verificationRequestId, { $set: { status: "FAILED", notificationStatus: "REJECTED" } });
-      await recordAudit(req.user!.id, "ATTENDANCE_REJECTED", "Attendance", id, { reason });
-      await createNotification({ guardId: String(attendance.guardId), siteId: String(attendance.siteId), kind: "ATTENDANCE_REJECTED", title: "Attendance needs correction", body: `Your attendance submission was rejected: ${reason}`, deepLink: "/guard/attendance", source: "ATTENDANCE_REVIEW", dedupeKey: `attendance-rejected:${id}`, priority: "HIGH" });
-      return res.json({ success: true, data: { attendance: publicAttendance(attendance) } });
-    }
-    attendance.status = "REJECTED";
-    attendance.verificationStatus = "rejected";
-    attendance.rejectionReason = reason;
-    attendance.verifiedBy = String(req.user!.id);
-    attendance.verifiedAt = rejectedAt.toISOString();
-    if (attendance.type === "RANDOM_VERIFICATION" && attendance.verificationRequestId) {
-      const verification = db.verifications.find((item) => item.id === attendance.verificationRequestId);
-      if (verification) { verification.status = "FAILED"; verification.notificationStatus = "REJECTED"; }
-    }
-    audit(req.user!.id, "ATTENDANCE_REJECTED", "Attendance", id, { reason });
-    await createNotification({ guardId: String(attendance.guardId), siteId: String(attendance.siteId), kind: "ATTENDANCE_REJECTED", title: "Attendance needs correction", body: `Your attendance submission was rejected: ${reason}`, deepLink: "/guard/attendance", source: "ATTENDANCE_REVIEW", dedupeKey: `attendance-rejected:${id}`, priority: "HIGH" });
-    return res.json({ success: true, data: { attendance: publicAttendance(attendance) } });
-  } catch (error) { return next(error); }
-});
-
-router.post("/attendance/bulk-verify", requireAuth, requireRoles("MAIN_SECURITY", "ADMIN"), async (req, res, next) => {
-  try {
-    const ids = Array.isArray(req.body?.ids) ? [...new Set(req.body.ids.filter((id: unknown): id is string => typeof id === "string" && id.length > 0))] : [];
-    if (!ids.length || ids.length > 50) return res.status(400).json({ success: false, error: "INVALID_ATTENDANCE_SELECTION" });
-    const verifiedAt = new Date();
-    let count = 0;
-    if (usingMongo()) {
-      const records: any[] = await AttendanceModel.find({ _id: { $in: ids }, status: "MANUAL_REVIEW", ...operationalFilter(req) });
-      for (const attendance of records) {
-        attendance.status = "VERIFIED";
-        attendance.verificationStatus = "verified";
-        attendance.verifiedAt = verifiedAt;
-        attendance.verifiedBy = String(req.user!.id);
-        await attendance.save();
-        await recordAudit(req.user!.id, "ATTENDANCE_VERIFIED", "Attendance", String(attendance._id), { bulk: true });
-        count += 1;
-      }
-    } else {
-      for (const attendance of db.attendance.filter((item) => ids.includes(item.id) && item.status === "MANUAL_REVIEW" && visibleOperation(req, item))) {
-        attendance.status = "VERIFIED";
-        attendance.verificationStatus = "verified";
-        attendance.verifiedAt = verifiedAt.toISOString();
-        attendance.verifiedBy = String(req.user!.id);
-        audit(req.user!.id, "ATTENDANCE_VERIFIED", "Attendance", attendance.id, { bulk: true });
-        count += 1;
-      }
-    }
-    return res.json({ success: true, data: { count } });
-  } catch (error) { return next(error); }
-});
-
-router.get("/attendance/:id/compare/:otherId", requireAuth, requireRoles("MAIN_SECURITY", "ADMIN"), async (req, res, next) => {
-  try {
-    const id = routeParam(req.params.id);
-    const otherId = routeParam(req.params.otherId);
-    const records: any[] = usingMongo()
-      ? await AttendanceModel.find({ _id: { $in: [id, otherId] }, ...operationalFilter(req) })
-      : db.attendance.filter((item) => [id, otherId].includes(item.id) && visibleOperation(req, item));
-    if (records.length !== 2) return res.status(404).json({ success: false, error: "ATTENDANCE_NOT_FOUND" });
-    return res.json({ success: true, data: { current: publicAttendance(records.find((item) => recordId(item) === id)), comparison: publicAttendance(records.find((item) => recordId(item) === otherId)) } });
-  } catch (error) { return next(error); }
-});
-
-router.post("/attendance/:id/correction-request", requireAuth, async (req, res, next) => {
-  try {
-    const id = routeParam(req.params.id);
-    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
-    if (reason.length < 3 || reason.length > 500) return res.status(400).json({ success: false, error: "CORRECTION_REASON_REQUIRED" });
-    const attendance: any = usingMongo() ? await AttendanceModel.findOne({ _id: id }) : db.attendance.find((item) => item.id === id);
-    if (!attendance || !visibleOperation(req, attendance)) return res.status(404).json({ success: false, error: "ATTENDANCE_NOT_FOUND" });
-    if (attendance.status === "CORRECTED") return res.status(409).json({ success: false, error: "ATTENDANCE_ALREADY_CORRECTED" });
-    if (usingMongo()) {
-      const existing = await AttendanceCorrectionModel.findOne({ attendanceId: id, status: "OPEN" });
-      if (existing) return res.status(409).json({ success: false, error: "CORRECTION_ALREADY_OPEN" });
-      const request: any = await AttendanceCorrectionModel.create({ _id: makeId("attcorr"), attendanceId: id, guardId: attendance.guardId, siteId: attendance.siteId, requestedBy: String(req.user!.id), reason, status: "OPEN" });
-      attendance.correctionRequestId = request._id;
-      await attendance.save();
-      await recordAudit(req.user!.id, "ATTENDANCE_CORRECTION_REQUESTED", "Attendance", id, { reason });
-      return res.status(201).json({ success: true, data: { correction: object(request) } });
-    }
-    if (db.attendanceCorrections.some((item) => item.attendanceId === id && item.status === "OPEN")) return res.status(409).json({ success: false, error: "CORRECTION_ALREADY_OPEN" });
-    const request: AttendanceCorrectionRecord = { id: newId("attcorr"), attendanceId: id, guardId: String(attendance.guardId), siteId: String(attendance.siteId), requestedBy: String(req.user!.id), reason, status: "OPEN" };
-    db.attendanceCorrections.unshift(request);
-    attendance.correctionRequestId = request.id;
-    audit(req.user!.id, "ATTENDANCE_CORRECTION_REQUESTED", "Attendance", id, { reason });
-    return res.status(201).json({ success: true, data: { correction: request } });
-  } catch (error) { return next(error); }
-});
-
-router.get("/attendance/corrections", requireAuth, requireRoles("MAIN_SECURITY", "ADMIN"), async (req, res, next) => {
-  try {
-    if (usingMongo()) {
-      const requests: any[] = await AttendanceCorrectionModel.find().sort({ createdAt: -1 }).limit(200);
-      const visible = [];
-      for (const request of requests) if (visibleOperation(req, { guardId: request.guardId, siteId: request.siteId })) visible.push(object(request));
-      return res.json({ success: true, data: { corrections: visible } });
-    }
-    return res.json({ success: true, data: { corrections: db.attendanceCorrections.filter((item) => visibleOperation(req, item)) } });
-  } catch (error) { return next(error); }
-});
-
-router.patch("/attendance/corrections/:id/resolve", requireAuth, requireRoles("MAIN_SECURITY", "ADMIN"), async (req, res, next) => {
-  try {
-    const id = routeParam(req.params.id);
-    const decision = req.body?.decision === "APPROVE" ? "APPROVED" : req.body?.decision === "REJECT" ? "REJECTED" : "";
-    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
-    if (!decision || reason.length < 3 || reason.length > 500) return res.status(400).json({ success: false, error: "CORRECTION_DECISION_REQUIRED" });
-    const request: any = usingMongo() ? await AttendanceCorrectionModel.findById(id) : db.attendanceCorrections.find((item) => item.id === id);
-    if (!request || !visibleOperation(req, request)) return res.status(404).json({ success: false, error: "CORRECTION_NOT_FOUND" });
-    if (request.status !== "OPEN") return res.status(409).json({ success: false, error: "CORRECTION_ALREADY_RESOLVED" });
-    const attendance: any = usingMongo() ? await AttendanceModel.findById(request.attendanceId) : db.attendance.find((item) => item.id === request.attendanceId);
-    if (!attendance || !visibleOperation(req, attendance)) return res.status(404).json({ success: false, error: "ATTENDANCE_NOT_FOUND" });
-    if (decision === "APPROVED") {
-      const captured = new Date(attendance.capturedAt);
-      const parts = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", year: "numeric", month: "numeric" }).formatToParts(captured);
-      const month = Number(parts.find((part) => part.type === "month")?.value);
-      const year = Number(parts.find((part) => part.type === "year")?.value);
-      const payrollLocked = usingMongo()
-        ? Boolean(await SalaryModel.findOne({ guardId: attendance.guardId, month, year, status: "PAID" }))
-        : db.salaries.some((salary) => salary.guardId === String(attendance.guardId) && salary.month === month && salary.year === year && salary.status === "PAID");
-      if (payrollLocked) return res.status(409).json({ success: false, error: "PAYROLL_LOCKED" });
-    }
-    const resolvedAt = new Date();
-    if (usingMongo()) {
-      request.status = decision;
-      request.decisionReason = reason;
-      request.resolvedBy = String(req.user!.id);
-      request.resolvedAt = resolvedAt;
-      await request.save();
-      if (decision === "APPROVED") { attendance.status = "CORRECTED"; attendance.correctionRequestId = request._id; attendance.notes = `${attendance.notes ?? ""}${attendance.notes ? "\n" : ""}Correction approved: ${reason}`.slice(0, 500); await attendance.save(); }
-      await recordAudit(req.user!.id, "ATTENDANCE_CORRECTION_RESOLVED", "AttendanceCorrection", id, { decision, reason });
-      return res.json({ success: true, data: { correction: object(request), attendance: publicAttendance(attendance) } });
-    }
-    request.status = decision;
-    request.decisionReason = reason;
-    request.resolvedBy = String(req.user!.id);
-    request.resolvedAt = resolvedAt.toISOString();
-    if (decision === "APPROVED") { attendance.status = "CORRECTED"; attendance.correctionRequestId = request.id; attendance.notes = `${attendance.notes ?? ""}${attendance.notes ? "\n" : ""}Correction approved: ${reason}`.slice(0, 500); }
-    audit(req.user!.id, "ATTENDANCE_CORRECTION_RESOLVED", "AttendanceCorrection", id, { decision, reason });
-    return res.json({ success: true, data: { correction: request, attendance: publicAttendance(attendance) } });
-  } catch (error) { return next(error); }
-});
-
 router.get("/attendance/today", requireAuth, async (req, res, next) => {
   try {
     const guardId = guardIdForUser(req.user);
@@ -3229,16 +2728,11 @@ router.get(
   async (req, res, next) => {
     try {
       const guardId = guardIdForUser(req.user);
-      const shifts: any[] = usingMongo()
-        ? await ShiftModel.find({ guardId }).sort({ startedAt: -1 }).limit(60)
-        : db.shifts
-            .filter((shift) => shift.guardId === guardId)
-            .sort(
-              (a, b) =>
-                new Date(b.startedAt).getTime() -
-                new Date(a.startedAt).getTime(),
-            )
-            .slice(0, 60);
+      const page = requestedPage(req.query);
+      const filter = { guardId };
+      const result = usingMongo() ? await mongoPage(ShiftModel, filter, { startedAt: -1, _id: -1 }, page, 60) : memoryPage(db.shifts.filter((shift) => shift.guardId === guardId).slice().sort((a,b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime() || b.id.localeCompare(a.id)), page, 60);
+      const shifts: any[] = result.records;
+      const completedCount = page === undefined ? undefined : usingMongo() ? await ShiftModel.countDocuments({ guardId, status: "COMPLETED" }) : db.shifts.filter((shift) => shift.guardId === guardId && shift.status === "COMPLETED").length;
       const records: any[] = usingMongo()
         ? await AttendanceModel.find({
             guardId,
@@ -3258,6 +2752,7 @@ router.get(
       return res.json({
         success: true,
         data: {
+          ...(result.pagination ? { pagination: result.pagination, completedCount } : {}),
           shifts: shifts.map((shift) => ({
             ...object(shift),
             attendance: byShift.get(String(shift._id ?? shift.id)) ?? [],
@@ -3271,62 +2766,43 @@ router.get(
 );
 router.get("/attendance/history", requireAuth, async (req, res, next) => {
   try {
-    const guardId =
-      req.user?.role === "GUARD"
-        ? req.user.guardId
-        : String(req.query.guardId ?? "");
+    const guardId = req.user?.role === "GUARD" ? req.user.guardId : String(req.query.guardId ?? "");
     if (req.user?.role === "GUARD" && !guardId) return res.status(403).json({ success: false, error: "FORBIDDEN" });
+    const page = requestedPage(req.query);
     const requestedLimit = Number(req.query.limit ?? 0);
-    const limit = Number.isFinite(requestedLimit)
-      ? Math.min(Math.max(Math.floor(requestedLimit), 0), 50)
-      : 0;
+    const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 0), 50) : 0;
+    const search = page === undefined ? "" : String(req.query.search ?? "").trim();
+    const status = page === undefined ? "ALL" : String(req.query.status ?? "ALL");
+    const statusValue = status === "PENDING" ? "MANUAL_REVIEW" : status;
+    const baseFilter: any = { ...operationalFilter(req), ...(guardId ? { guardId } : {}), ...(req.query.legacy === "true" ? { type: { $ne: "DUTY_PHOTO" } } : {}) };
+    const hasFlags = { $gt: [{ $size: { $cond: [{ $isArray: "$reviewFlags" }, "$reviewFlags", []] } }, 0] };
+    let result: { records: any[]; pagination?: import("../shared/pagination.js").Pagination };
+    let summary: any;
     if (usingMongo()) {
-      const attendanceQuery = AttendanceModel.find(
-        { ...operationalFilter(req), ...(guardId ? { guardId } : {}) },
-      ).sort({ capturedAt: -1 });
-      if (limit) attendanceQuery.limit(limit);
-      const records: any[] = await attendanceQuery;
-      const guards = new Map(
-        objects(
-          await GuardModel.find({
-            _id: { $in: [...new Set(records.map((item) => item.guardId))] },
-          }),
-        ).map((item: any) => [item.id, item.name]),
-      );
-      const sites = new Map(
-        objects(
-          await SiteModel.find({
-            _id: { $in: [...new Set(records.map((item) => item.siteId))] },
-          }),
-        ).map((item: any) => [item.id, { siteCode: item.siteCode, siteName: item.siteName }]),
-      );
-      return res.json({
-        success: true,
-        data: {
-          attendance: records.map((item) => ({
-            ...publicAttendance(item),
-            guardId: String(item.guardId),
-            guard: guards.get(String(item.guardId)),
-            site: sites.get(String(item.siteId))?.siteCode,
-            siteName: sites.get(String(item.siteId))?.siteName,
-          })),
-        },
-      });
+      if (search) {
+        const literal = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const pattern = { $regex: literal, $options: "i" };
+        const [guardMatches, siteMatches] = await Promise.all([GuardModel.find({ name: pattern }).select({ _id: 1 }).lean(), SiteModel.find({ $or: [{ siteCode: pattern }, { siteName: pattern }] }).select({ _id: 1 }).lean()]);
+        baseFilter.$and = [...(baseFilter.$and ?? []), { $or: [{ _id: pattern }, { type: pattern }, { guardId: { $in: guardMatches.map((item: any) => String(item._id)) } }, { siteId: { $in: siteMatches.map((item: any) => String(item._id)) } }] }];
+      }
+      const filter = { ...baseFilter, ...(status === "FLAGGED" ? { $expr: hasFlags } : status !== "ALL" ? { status: statusValue } : {}) };
+      result = await mongoPage(AttendanceModel, filter, { capturedAt: -1, _id: -1 }, page, limit || undefined);
+      if (page !== undefined) {
+        const totals = await AttendanceModel.aggregate([{ $match: baseFilter }, { $group: { _id: null, total: { $sum: 1 }, verified: { $sum: { $cond: [{ $eq: ["$status", "VERIFIED"] }, 1, 0] } }, pending: { $sum: { $cond: [{ $eq: ["$status", "MANUAL_REVIEW"] }, 1, 0] } }, flagged: { $sum: { $cond: [hasFlags, 1, 0] } } } }]);
+        summary = totals[0] ?? { total: 0, verified: 0, pending: 0, flagged: 0 };
+      }
+      const [guards, sites] = await Promise.all([GuardModel.find({ _id: { $in: [...new Set(result.records.map((item) => String(item.guardId)))] } }), SiteModel.find({ _id: { $in: [...new Set(result.records.map((item) => String(item.siteId)))] } })]);
+      const guardMap = new Map(guards.map((item: any) => [recordId(item), item.name]));
+      const siteMap = new Map(sites.map((item: any) => [recordId(item), item]));
+      result.records = result.records.map((item) => ({ ...publicAttendance(item), guardId: String(item.guardId), guard: guardMap.get(String(item.guardId)), site: siteMap.get(String(item.siteId))?.siteCode, siteName: siteMap.get(String(item.siteId))?.siteName }));
+    } else {
+      const scoped = db.attendance.filter((item) => visibleOperation(req, item) && (!guardId || item.guardId === guardId) && (req.query.legacy !== "true" || item.type !== "DUTY_PHOTO")).map((item) => ({ ...publicAttendance(item), guard: db.guards.find((guard) => guard.id === item.guardId)?.name, site: db.sites.find((site) => site.id === item.siteId)?.siteCode, siteName: db.sites.find((site) => site.id === item.siteId)?.siteName })).filter((item) => !search || [item.guard, item.site, item.siteName, item.id, item.type].some((value) => String(value ?? "").toLowerCase().includes(search.toLowerCase())));
+      summary = page === undefined ? undefined : { total: scoped.length, verified: scoped.filter((item) => item.status === "VERIFIED").length, pending: scoped.filter((item) => item.status === "MANUAL_REVIEW").length, flagged: scoped.filter((item) => item.reviewFlags?.length).length };
+      const matching = scoped.filter((item) => status === "ALL" || (status === "FLAGGED" ? Boolean(item.reviewFlags?.length) : item.status === statusValue)).sort((a,b) => new Date(b.capturedAt).getTime() - new Date(a.capturedAt).getTime() || String(b.id).localeCompare(String(a.id)));
+      result = memoryPage(matching, page, limit || undefined);
     }
-    const filteredRecords = db.attendance
-      .filter((item) => visibleOperation(req, item) && (!guardId || item.guardId === guardId))
-      .map((item) => ({
-        ...item,
-        guardId: item.guardId,
-        guard: db.guards.find((guard) => guard.id === item.guardId)?.name,
-        site: db.sites.find((site) => site.id === item.siteId)?.siteCode,
-        siteName: db.sites.find((site) => site.id === item.siteId)?.siteName,
-      }));
-    const records = limit ? filteredRecords.slice(0, limit) : filteredRecords;
-    return res.json({ success: true, data: { attendance: records.map(publicAttendance) } });
-  } catch (error) {
-    return next(error);
-  }
+    return res.json({ success: true, data: { attendance: result.records, ...(result.pagination ? { pagination: result.pagination, summary } : {}) } });
+  } catch (error) { return next(error); }
 });
 if (false)
   router.get("/attendance/today", requireAuth, async (req, res, next) => {
@@ -3364,22 +2840,23 @@ if (false)
 
 router.get("/incidents", requireAuth, async (req, res, next) => {
   try {
-    const records: any[] = usingMongo()
-      ? await IncidentModel.find(
-          operationalFilter(req),
-        ).sort({ capturedAt: -1 })
-      : db.incidents.filter(
+    const page = requestedPage(req.query);
+    const result = usingMongo()
+      ? await mongoPage(IncidentModel, operationalFilter(req), { capturedAt: -1, _id: -1 }, page)
+      : memoryPage(db.incidents.filter(
           (item) =>
             visibleOperation(req, item),
-        );
+        ).slice().sort((a,b) => new Date(b.capturedAt).getTime() - new Date(a.capturedAt).getTime() || b.id.localeCompare(a.id)), page);
+    const records: any[] = result.records;
     if (usingMongo())
       return res.json({
         success: true,
-        data: { incidents: await withLabels(records) },
+        data: { ...(result.pagination ? { pagination: result.pagination } : {}), incidents: await withLabels(records) },
       });
     return res.json({
       success: true,
       data: {
+        ...(result.pagination ? { pagination: result.pagination } : {}),
         incidents: records.map((item) => ({
           ...item,
           guard: db.guards.find((guard) => guard.id === item.guardId)?.name,
@@ -3791,9 +3268,18 @@ router.get("/payroll", requireAuth, requireRoles("GUARD", "ADMIN"), async (req, 
   try {
     const guardIds = req.user?.role === "GUARD" ? [req.user.guardId].filter(Boolean) as string[] : undefined;
     const query: any = guardIds ? { guardId: { $in: guardIds } } : (req.query.guardId ? { guardId: String(req.query.guardId) } : {});
-    const records: any[] = usingMongo() ? await SalaryModel.find(query).sort({ year: -1, month: -1 }) : db.salaries.filter((item) => !query.guardId || (query.guardId.$in ? query.guardId.$in.includes(item.guardId) : item.guardId === query.guardId)).sort((a, b) => b.year - a.year || b.month - a.month);
+    const page = requestedPage(req.query);
+    const matching = usingMongo() ? undefined : db.salaries.filter((item) => !query.guardId || (query.guardId.$in ? query.guardId.$in.includes(item.guardId) : item.guardId === query.guardId)).slice().sort((a,b) => b.year - a.year || b.month - a.month || b.id.localeCompare(a.id));
+    const result = usingMongo() ? await mongoPage(SalaryModel, query, { year: -1, month: -1, _id: -1 }, page) : memoryPage(matching!, page);
+    const records: any[] = result.records;
+    let summary: any;
+    if (page !== undefined) {
+      const latest: any = usingMongo() ? await SalaryModel.findOne(query).sort({ year: -1, month: -1, _id: -1 }) : matching?.[0];
+      const totals = usingMongo() ? await SalaryModel.aggregate([{ $match: query }, { $group: { _id: null, totalNet: { $sum: { $ifNull: ["$netPayable", { $ifNull: ["$finalSalary", 0] }] } } } }]) : [{ totalNet: matching!.reduce((sum,item) => sum + Number(item.netPayable ?? item.finalSalary ?? 0), 0) }];
+      summary = { totalNet: totals[0]?.totalNet ?? 0, latest: latest ? safeSalary(latest) : undefined };
+    }
     const guards = new Map((usingMongo() ? objects(await GuardModel.find({ _id: { $in: [...new Set(records.map((item) => String(item.guardId)))] } })) : db.guards.filter((item) => records.some((salary) => salary.guardId === item.id))).map((item: any) => [String(item.id), item.name]));
-    return res.json({ success: true, data: { salaries: records.map((item) => safeSalary(item, guards.get(String(item.guardId)))) } });
+    return res.json({ success: true, data: { ...(result.pagination ? { pagination: result.pagination, summary } : {}), salaries: records.map((item) => safeSalary(item, guards.get(String(item.guardId)))) } });
   } catch (error) { return next(error); }
 });
 
@@ -3849,31 +3335,91 @@ router.get("/payroll/:id/payslip", requireAuth, async (req, res, next) => {
 const documentTypes = ["AADHAAR", "PAN", "BANK_PASSBOOK", "POLICE_VERIFICATION", "MEDICAL", "ADDRESS_PROOF", "TRAINING_CERTIFICATE", "PHOTO", "OTHER"] as const;
 const documentView = (value: any) => {
   const item = object(value);
-  const expiresAt = item.expiresAt ? new Date(item.expiresAt).getTime() : 0;
-  if (expiresAt && expiresAt < Date.now() && item.status !== "REJECTED") item.status = "EXPIRED";
+  item.status = "APPROVED";
   delete item.storageKey; delete item.fileHash; delete item.payslipStorageKey;
+  delete item.reviewedBy; delete item.reviewedAt; delete item.reviewerComment; delete item.rejectionReason;
   return item;
 };
 async function canViewDocumentForRequest(req: express.Request, document: any) {
   const guard: any = document?.guardId ? await findGuard(String(document.guardId)) : undefined;
-  return Boolean(document && guard && canReadOwnedPrivate(req.user, { guardId: String(document.guardId) }));
+  return Boolean(document && guard && canReadDocument(req.user, { guardId: String(document.guardId), siteId: guard.assignedSite }));
 }
 
 router.get("/guards/:id/documents", requireAuth, async (req, res, next) => {
   try {
     const id = routeParam(req.params.id); const guard: any = await findGuard(id);
-    const allowed = Boolean(guard && canReadOwnedPrivate(req.user, { guardId: id }));
+    const allowed = Boolean(guard && canReadDocument(req.user, { guardId: id, siteId: guard.assignedSite }));
     if (!allowed) return res.status(403).json({ success: false, error: "FORBIDDEN" });
-    const documents: any[] = usingMongo() ? await DocumentModel.find({ guardId: id }).sort({ type: 1, version: -1 }) : db.documents.filter((doc) => doc.guardId === id).sort((a, b) => String(a.type).localeCompare(String(b.type)) || Number(b.version ?? 1) - Number(a.version ?? 1));
-    return res.json({ success: true, data: { documents: documents.map(documentView) } });
+    const page = requestedPage(req.query);
+    const filter = { guardId: id };
+    const result = usingMongo() ? await mongoPage(DocumentModel, filter, { type: 1, version: -1, _id: -1 }, page) : memoryPage(db.documents.filter((doc) => doc.guardId === id).slice().sort((a,b) => String(a.type).localeCompare(String(b.type)) || Number(b.version ?? 1) - Number(a.version ?? 1) || b.id.localeCompare(a.id)), page);
+    const documentTypes = page === undefined ? undefined : usingMongo() ? await DocumentModel.distinct("type", filter) : [...new Set(db.documents.filter((doc) => doc.guardId === id).map((doc) => doc.type))];
+    return res.json({ success: true, data: { documents: result.records.map((doc) => ({ ...documentView(doc), previewUrl: `/api/documents/${recordId(doc)}/preview` })), ...(result.pagination ? { pagination: result.pagination, documentTypes } : {}) } });
   } catch (error) { return next(error); }
 });
 
-router.get("/documents", requireAuth, requireRoles("ADMIN"), async (req, res, next) => {
+router.get("/documents", requireAuth, requireRoles("ADMIN", "MAIN_SECURITY"), async (req, res, next) => {
   try {
-    const all: any[] = usingMongo() ? await DocumentModel.find().sort({ uploadedAt: -1 }).limit(500) : db.documents.slice(0, 500);
+    const page = requestedPage(req.query);
+    const documentGuardIds = req.user?.role === "MAIN_SECURITY" ? (usingMongo() ? (await GuardModel.find({ assignedSite: { $in: req.user.assignedSiteIds ?? [] } }).select({ _id: 1 })).map((g) => String(g._id)) : db.guards.filter((g) => canManageGuard(req.user, { siteId: g.assignedSite })).map((g) => g.id)) : undefined;
+    if (req.query.guardId && documentGuardIds && !documentGuardIds.includes(String(req.query.guardId))) return res.status(403).json({ success: false, error: "FORBIDDEN" });
+    if (page !== undefined) {
+      const query: any = req.query.guardId ? { guardId: String(req.query.guardId) } : {};
+      const search = String(req.query.search ?? "").trim();
+      const status = String(req.query.status ?? "");
+      if (documentGuardIds && !query.guardId) query.guardId = { $in: documentGuardIds };
+      const grouped = req.query.groupBy === "guard";
+      let pagination;
+      let rows: any[];
+      if (usingMongo()) {
+        const pipeline: any[] = [{ $match: query }, { $lookup: { from: GuardModel.collection.name, localField: "guardId", foreignField: "_id", as: "guardRecord" } }, { $unwind: "$guardRecord" }];
+        if (status) pipeline.push({ $addFields: { effectiveStatus: { $cond: [{ $and: [{ $gt: ["$expiresAt", null] }, { $lt: ["$expiresAt", new Date()] }, { $ne: ["$status", "REJECTED"] }] }, "EXPIRED", "$status"] } } }, { $match: { effectiveStatus: status } });
+        if (search) {
+          const literal = search.split("").map((char) => ".*+?^$".includes(char) || "{}()|[]".includes(char) || char.charCodeAt(0) === 92 ? String.fromCharCode(92) + char : char).join("");
+          pipeline.push({ $match: { $or: ["guardRecord.name", "guardRecord.employeeCode", "guardRecord.mobile", "type", "originalName"].map((field) => ({ [field]: { $regex: literal, $options: "i" } })) } });
+        }
+        if (grouped) pipeline.push({ $group: { _id: "$guardId", guardRecord: { $first: "$guardRecord" }, latestUpload: { $max: "$uploadedAt" }, documentCount: { $sum: 1 } } });
+        const totals = await DocumentModel.aggregate([...pipeline, { $count: "total" }]);
+        pagination = paginationFor(totals[0]?.total ?? 0, page);
+        rows = await DocumentModel.aggregate([...pipeline, { $sort: grouped ? { latestUpload: -1, _id: 1 } : { uploadedAt: -1, _id: -1 } }, { $skip: (pagination.page - 1) * pagination.pageSize }, { $limit: pagination.pageSize }]);
+      } else {
+        const guards = new Map(db.guards.map((guard) => [guard.id, guard]));
+        const matching = db.documents.filter((doc) => {
+          const guard = guards.get(String(doc.guardId));
+          return guard && (!documentGuardIds || documentGuardIds.includes(String(doc.guardId))) && (!req.query.guardId || doc.guardId === String(req.query.guardId)) && (!status || documentView(doc).status === status) && (!search || [guard.name, guard.employeeCode, guard.mobile, doc.type, doc.originalName].some((value) => String(value ?? "").toLowerCase().includes(search.toLowerCase())));
+        });
+        if (grouped) {
+          const groups = new Map<string, any>();
+          for (const doc of matching) { const id = String(doc.guardId); const existing = groups.get(id); if (existing) { existing.documentCount++; if (String(doc.uploadedAt) > String(existing.latestUpload)) existing.latestUpload = doc.uploadedAt; } else groups.set(id, { _id: id, guardRecord: guards.get(id), latestUpload: doc.uploadedAt, documentCount: 1 }); }
+          const result = memoryPage([...groups.values()].sort((a,b) => String(b.latestUpload).localeCompare(String(a.latestUpload)) || a._id.localeCompare(b._id)), page); rows = result.records; pagination = result.pagination!;
+        } else {
+          const result = memoryPage(matching.slice().sort((a,b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime() || b.id.localeCompare(a.id)), page); rows = result.records.map((doc) => ({ ...doc, guardRecord: guards.get(String(doc.guardId)) })); pagination = result.pagination!;
+        }
+      }
+      const assignedSites = [...new Set(rows.map((row) => String(row.guardRecord?.assignedSite ?? "")).filter(Boolean))];
+      const sites: any[] = usingMongo() ? await SiteModel.find({ $or: [{ _id: { $in: assignedSites } }, { siteCode: { $in: assignedSites } }] }).select({ siteCode: 1, siteName: 1 }) : db.sites.filter((site) => assignedSites.includes(site.id) || assignedSites.includes(site.siteCode));
+      const lookup = new Map<string, { siteCode: string; siteName: string }>();
+      for (const site of sites) for (const key of [site._id, site.id, site.siteCode]) if (key) lookup.set(String(key), { siteCode: String(site.siteCode ?? ""), siteName: String(site.siteName ?? "") });
+      const values = rows.map((row) => {
+        const guard = withAssignedSiteDetails(row.guardRecord, lookup, req.user);
+        const guardDetails = { id: guard.id, mobile: guard.mobile, village: guard.village, employmentStatus: guard.employmentStatus, profilePhotoUrl: guard.profilePhotoUrl, assignedSiteDetails: guard.assignedSiteDetails };
+        if (grouped) return { id: guard.id, guardId: guard.id, guard: guard.name, employeeCode: guard.employeeCode, guardDetails, documentCount: row.documentCount };
+        const { guardRecord, effectiveStatus, ...doc } = row;
+        return { ...documentView(doc), guard: guard.name, employeeCode: guard.employeeCode, guardDetails, previewUrl: `/api/documents/${recordId(doc)}/preview` };
+      });
+      return res.json({ success: true, data: { ...(grouped ? { documentGroups: values } : { documents: values }), pagination } });
+    }
+    const all: any[] = usingMongo() ? await DocumentModel.find(documentGuardIds ? { guardId: { $in: documentGuardIds } } : {}).sort({ uploadedAt: -1 }) : db.documents.filter((d) => !documentGuardIds || documentGuardIds.includes(String(d.guardId)));
     const guards: any[] = usingMongo() ? await GuardModel.find({ _id: { $in: [...new Set(all.map((item) => String(item.guardId)).filter(Boolean))] } }) : db.guards;
     const guardMap = new Map(guards.map((guard: any) => [recordId(guard), guard]));
+    const sites: any[] = usingMongo() ? await SiteModel.find({}, { siteCode: 1, siteName: 1 }).lean() : db.sites;
+    const siteLookup = new Map<string, { siteCode: string; siteName: string }>();
+    for (const site of sites) {
+      const details = { siteCode: String(site.siteCode ?? ""), siteName: String(site.siteName ?? "") };
+      for (const key of [site._id, site.id, site.siteCode]) {
+        if (key !== undefined && key !== null && key !== "") siteLookup.set(String(key), details);
+      }
+    }
     const documents = all.filter((doc) => {
       const guard = guardMap.get(String(doc.guardId));
       if (!guard || (req.user?.role === "MAIN_SECURITY" && !canAccessSite(req.user, String(guard.assignedSite ?? "")))) return false;
@@ -3882,7 +3428,18 @@ router.get("/documents", requireAuth, requireRoles("ADMIN"), async (req, res, ne
       const search = String(req.query.search ?? "").trim().toLowerCase();
       return !search || [guard.name, guard.employeeCode, guard.mobile, doc.type, doc.originalName].some((value) => String(value ?? "").toLowerCase().includes(search));
     });
-    return res.json({ success: true, data: { documents: documents.map((doc) => ({ ...documentView(doc), guard: guardMap.get(String(doc.guardId))?.name, employeeCode: guardMap.get(String(doc.guardId))?.employeeCode, previewUrl: `/api/documents/${recordId(doc)}/preview` })) } });
+    return res.json({ success: true, data: { documents: documents.map((doc) => {
+      const guard = withAssignedSiteDetails(guardMap.get(String(doc.guardId)), siteLookup, req.user);
+      return {
+        ...documentView(doc), guard: guard.name, employeeCode: guard.employeeCode,
+        guardDetails: {
+          id: guard.id, mobile: guard.mobile, village: guard.village,
+          employmentStatus: guard.employmentStatus, profilePhotoUrl: guard.profilePhotoUrl,
+          assignedSiteDetails: guard.assignedSiteDetails,
+        },
+        previewUrl: `/api/documents/${recordId(doc)}/preview`,
+      };
+    }) } });
   } catch (error) { return next(error); }
 });
 
@@ -3896,7 +3453,7 @@ router.post(
     try {
       const id = routeParam(req.params.id);
       const guard: any = await findGuard(id);
-      if (!guard || !req.file || !(req.user?.role === "ADMIN" || (req.user?.role === "GUARD" && req.user.guardId === id)))
+      if (!guard || !req.file || !canManageGuard(req.user, { siteId: guard.assignedSite }))
         return res.status(400).json({ success: false, error: "FILE_REQUIRED" });
       const type = String(req.body.type ?? "OTHER").toUpperCase();
       if (!documentTypes.includes(type as (typeof documentTypes)[number])) return res.status(400).json({ success: false, error: "INVALID_DOCUMENT_TYPE" });
@@ -3920,8 +3477,8 @@ router.post(
         uploadedBy: req.user?.id ?? "",
         uploadedAt: new Date(),
         notes: req.body.notes,
-        status: "PENDING", expiresAt, version: Number(previous?.version ?? 0) + 1, previousDocumentId: previous ? recordId(previous) : undefined,
-        fileHash, duplicateOf: duplicate ? recordId(duplicate) : undefined, duplicateWarning: duplicate ? "Exact file hash already exists in the system; reviewer confirmation is required." : undefined,
+        status: "APPROVED", expiresAt, version: Number(previous?.version ?? 0) + 1, previousDocumentId: previous ? recordId(previous) : undefined,
+        fileHash, duplicateOf: duplicate ? recordId(duplicate) : undefined, duplicateWarning: duplicate ? "This file is already stored in the system." : undefined,
         documentNumberMasked: req.body.documentNumber ? maskSensitive(req.body.documentNumber) : undefined, sensitive: ["AADHAAR", "PAN", "BANK_PASSBOOK"].includes(type), required: req.body.required === true || req.body.required === "true", checklistKey: type, uploadedByRole: req.user?.role,
       };
       if (usingMongo()) {
@@ -3930,7 +3487,7 @@ router.post(
           ...value,
         });
         createdDocumentId = recordId(document);
-        await GuardModel.updateOne({ _id: id }, { $inc: { documentCount: 1 } });
+        await GuardModel.updateOne({ _id: id }, { $set: { documentCount: (await DocumentModel.distinct("type", { guardId: id })).length } });
         await recordAudit(req.user!.id, "DOCUMENT_UPLOADED", "Document", recordId(document), { guardId: id, type: value.type, version: value.version, duplicate: Boolean(duplicate) });
         return res
           .status(201)
@@ -3943,50 +3500,21 @@ router.post(
       } as any;
       createdDocumentId = document.id;
       db.documents.unshift(document);
+      guard.documentCount = new Set(db.documents.filter((doc) => doc.guardId === id).map((doc) => doc.type)).size;
       await recordAudit(req.user!.id, "DOCUMENT_UPLOADED", "Document", document.id, { guardId: id, type: value.type, version: value.version, duplicate: Boolean(duplicate) });
       return res.status(201).json({ success: true, data: { document: documentView(document) } });
     } catch (error) {
       if (createdDocumentId) {
         if (usingMongo()) {
           await DocumentModel.deleteOne({ _id: createdDocumentId });
-          await GuardModel.updateOne({ _id: routeParam(req.params.id) }, { $inc: { documentCount: -1 } });
-        } else db.documents = db.documents.filter((item) => item.id !== createdDocumentId);
+          await GuardModel.updateOne({ _id: routeParam(req.params.id) }, { $set: { documentCount: (await DocumentModel.distinct("type", { guardId: routeParam(req.params.id) })).length } });
+        } else { db.documents = db.documents.filter((item) => item.id !== createdDocumentId); const guard = db.guards.find((g) => g.id === routeParam(req.params.id)); if (guard) guard.documentCount = new Set(db.documents.filter((doc) => doc.guardId === guard.id).map((doc) => doc.type)).size; }
       }
       if (savedUpload) await deleteLocalUpload(savedUpload.storageKey);
       return next(error);
     }
   },
 );
-router.patch("/documents/:id/review", requireAuth, requireRoles("ADMIN"), async (req, res, next) => {
-  try {
-    const id = routeParam(req.params.id); const status = String(req.body?.status ?? "").toUpperCase();
-    if (!["APPROVED", "REJECTED", "EXPIRED"].includes(status)) return res.status(400).json({ success: false, error: "INVALID_DOCUMENT_REVIEW_STATUS" });
-    const document: any = usingMongo() ? await DocumentModel.findById(id) : db.documents.find((item) => item.id === id);
-    if (!document || !(await canViewDocumentForRequest(req, document))) return res.status(document ? 403 : 404).json({ success: false, error: document ? "FORBIDDEN" : "DOCUMENT_NOT_FOUND" });
-    if (status === "REJECTED" && String(req.body?.reason ?? "").trim().length < 3) return res.status(400).json({ success: false, error: "REJECTION_REASON_REQUIRED" });
-    Object.assign(document, { status, reviewedBy: req.user!.id, reviewedAt: new Date(), reviewerComment: req.body?.comment, rejectionReason: status === "REJECTED" ? String(req.body.reason).trim() : undefined });
-    if (usingMongo()) await document.save();
-    await recordAudit(req.user!.id, `DOCUMENT_${status}`, "Document", id, { guardId: String(document.guardId), reason: req.body?.reason ?? req.body?.comment });
-    await createNotification({ guardId: String(document.guardId), kind: `DOCUMENT_${status}`, title: `Document ${status.toLowerCase()}`, body: status === "REJECTED" ? `Your ${document.type} document needs replacement: ${document.rejectionReason}` : `Your ${document.type} document was ${status.toLowerCase()}.`, deepLink: "/guard/documents", source: "DOCUMENT_REVIEW", dedupeKey: `document-review:${id}:${status}:${String(document.reviewedAt)}`, priority: status === "REJECTED" ? "HIGH" : "NORMAL" });
-    return res.json({ success: true, data: { document: documentView(document) } });
-  } catch (error) { return next(error); }
-});
-router.post("/documents/bulk-review", requireAuth, requireRoles("ADMIN"), async (req, res, next) => {
-  try {
-    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String).slice(0, 100) : []; const status = String(req.body?.status ?? "").toUpperCase();
-    if (!ids.length || !["APPROVED", "REJECTED", "EXPIRED"].includes(status)) return res.status(400).json({ success: false, error: "INVALID_BULK_DOCUMENT_REVIEW" });
-    if (status === "REJECTED" && String(req.body?.reason ?? "").trim().length < 3) return res.status(400).json({ success: false, error: "REJECTION_REASON_REQUIRED" });
-    const changed: any[] = [];
-    for (const id of ids) {
-      const document: any = usingMongo() ? await DocumentModel.findById(id) : db.documents.find((item) => item.id === id);
-      if (!document || !(await canViewDocumentForRequest(req, document))) continue;
-      Object.assign(document, { status, reviewedBy: req.user!.id, reviewedAt: new Date(), reviewerComment: req.body?.comment, rejectionReason: status === "REJECTED" ? String(req.body.reason).trim() : undefined });
-      if (usingMongo()) await document.save(); changed.push(documentView(document));
-    }
-    await recordAudit(req.user!.id, "DOCUMENT_BULK_REVIEW", "Document", "bulk", { status, count: changed.length, ids: changed.map((item) => item.id) });
-    return res.json({ success: true, data: { documents: changed } });
-  } catch (error) { return next(error); }
-});
 router.get("/documents/:id/history", requireAuth, async (req, res, next) => {
   try {
     const id = routeParam(req.params.id); const document: any = usingMongo() ? await DocumentModel.findById(id) : db.documents.find((item) => item.id === id);
@@ -4087,161 +3615,6 @@ router.get(
   },
 );
 
-router.post(
-  "/verifications",
-  requireAuth,
-  requireRoles("MAIN_SECURITY", "ADMIN"),
-  async (req, res, next) => {
-    try {
-      const guard: any = await findGuard(String(req.body.guardId));
-      const active: any = await findActiveShift(
-        String(guard?._id ?? guard?.id),
-      );
-      if (!guard?.assignedSite)
-        return res
-          .status(400)
-          .json({ success: false, error: "GUARD_SITE_REQUIRED" });
-      if (!active)
-        return res
-          .status(409)
-          .json({ success: false, error: "NO_ACTIVE_SHIFT" });
-      if (!canAccessSite(req.user, String(guard.assignedSite)) || !visibleOperation(req, active))
-        return res.status(403).json({ success: false, error: "FORBIDDEN" });
-      const guardId = String(guard._id ?? guard.id);
-      const now = new Date();
-      const value = {
-        guardId,
-        siteId: String(guard.assignedSite),
-        shiftId: String(active._id ?? active.id),
-        status: "SENT",
-        requestCreatedAt: now,
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
-        notificationStatus: "PENDING",
-      };
-      let verification: any;
-      let notification: any;
-      let user: any;
-      if (usingMongo()) {
-        user = await UserModel.findOne({ guardId });
-        verification = await VerificationRequestModel.create({
-          _id: makeId("verify"),
-          ...value,
-        });
-        notification = await NotificationModel.create({
-          _id: makeId("notification"),
-          userId: user?._id,
-          guardId,
-          requestId: verification._id,
-          title: "Attendance check",
-          body: "Please submit your attendance photo.",
-          kind: "VERIFICATION",
-          deepLink: `/guard?verification=${verification._id}`,
-          deliveryStatus: "PENDING",
-          status: "UNREAD",
-          createdAt: now,
-        });
-        const deliveryStatus = await deliverPushToUser(
-          user?._id ? String(user._id) : undefined,
-          {
-            title: notification.title,
-            body: notification.body,
-            deepLink: notification.deepLink,
-          },
-        );
-        notification.deliveryStatus = deliveryStatus;
-        await notification.save();
-        verification.notificationStatus = deliveryStatus;
-        await verification.save();
-        await recordAudit(
-          String(req.user?.id),
-          "VERIFICATION_REQUESTED",
-          "VerificationRequest",
-          String(verification._id),
-          { guardId, deliveryStatus },
-        );
-        return res
-          .status(201)
-          .json({
-            success: true,
-            data: {
-              verification: object(verification),
-              notification: object(notification),
-            },
-          });
-      }
-      user = db.users.find((item) => item.guardId === guardId);
-      verification = {
-        id: newId("verify"),
-        ...value,
-        requestCreatedAt: now.toISOString(),
-        expiresAt: value.expiresAt.toISOString(),
-        notificationStatus: "CREATED",
-      } as any;
-      notification = {
-        id: newId("notification"),
-        userId: user?.id,
-        guardId,
-        requestId: verification.id,
-        title: "Attendance check",
-        body: "Please submit your attendance photo.",
-        kind: "VERIFICATION",
-        deepLink: `/guard?verification=${verification.id}`,
-        deliveryStatus: "PENDING",
-        status: "UNREAD",
-        createdAt: now.toISOString(),
-      };
-      db.verifications.unshift(verification);
-      db.notifications.unshift(notification);
-      audit(
-        String(req.user?.id),
-        "VERIFICATION_REQUESTED",
-        "VerificationRequest",
-        verification.id,
-        { guardId },
-      );
-      return res
-        .status(201)
-        .json({ success: true, data: { verification, notification } });
-    } catch (error) {
-      return next(error);
-    }
-  },
-);
-router.patch(
-  "/verifications/:id/open",
-  requireAuth,
-  requireRoles("GUARD"),
-  async (req, res, next) => {
-    try {
-      const id = routeParam(req.params.id);
-      const guardId = guardIdForUser(req.user);
-      const item: any = usingMongo()
-        ? await VerificationRequestModel.findOne({ _id: id, guardId })
-        : db.verifications.find(
-            (value) => value.id === id && value.guardId === guardId,
-          );
-      if (!item)
-        return res
-          .status(404)
-          .json({ success: false, error: "VERIFICATION_NOT_FOUND" });
-      if (
-        new Date(item.expiresAt).getTime() <= Date.now() &&
-        item.status !== "VERIFIED"
-      )
-        return res
-          .status(410)
-          .json({ success: false, error: "VERIFICATION_EXPIRED" });
-      item.status = "OPENED";
-      item.notificationOpenedAt = new Date();
-      item.notificationStatus = "OPENED";
-      if (usingMongo()) await item.save();
-      else item.notificationOpenedAt = new Date().toISOString();
-      return res.json({ success: true, data: { verification: object(item) } });
-    } catch (error) {
-      return next(error);
-    }
-  },
-);
 router.get("/verifications", requireAuth, async (req, res, next) => {
   try {
     const filter =
@@ -4286,13 +3659,14 @@ router.get("/verifications/:id", requireAuth, async (req, res, next) => {
 router.get("/notifications", requireAuth, async (req, res, next) => {
   try {
     const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 100); const offset = Math.max(Number(req.query.offset ?? 0) || 0, 0);
-    const records = usingMongo()
-      ? await NotificationModel.find(notificationFilter(req)).sort({ createdAt: -1 }).skip(offset).limit(limit)
-      : db.notifications.filter((item) => canReadPrivate(req.user, item)).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(offset, offset + limit);
+    const page = requestedPage(req.query);
+    const filter = notificationFilter(req);
+    const result = page === undefined ? undefined : usingMongo() ? await mongoPage(NotificationModel, filter, { createdAt: -1, _id: -1 }, page) : memoryPage(db.notifications.filter((item) => canReadPrivate(req.user, item)).slice().sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime() || b.id.localeCompare(a.id)), page);
+    const records = result ? result.records : usingMongo() ? await NotificationModel.find(filter).sort({ createdAt: -1 }).skip(offset).limit(limit) : db.notifications.filter((item) => canReadPrivate(req.user, item)).sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(offset, offset + limit);
     const unreadCount = usingMongo() ? await NotificationModel.countDocuments({ ...notificationFilter(req), status: { $ne: "READ" } }) : db.notifications.filter((item) => canReadPrivate(req.user, item) && item.status !== "READ").length;
     return res.json({
       success: true,
-      data: { notifications: objects(records), unreadCount, offset, limit },
+      data: { notifications: objects(records), unreadCount, offset, limit, ...(result?.pagination ? { pagination: result.pagination } : {}) },
     });
   } catch (error) {
     return next(error);
@@ -4418,10 +3792,11 @@ router.get(
   requireRoles("ADMIN"),
   async (_req, res, next) => {
     try {
-      const records = usingMongo()
-        ? await AuditLogModel.find().sort({ at: -1 }).limit(100)
-        : db.audits.slice(0, 100);
-      return res.json({ success: true, data: { audits: objects(records) } });
+      const page = requestedPage(_req.query);
+      const result = usingMongo()
+        ? await mongoPage(AuditLogModel, {}, { at: -1, _id: -1 }, page, 100)
+        : memoryPage(db.audits.slice().sort((a,b) => new Date(b.at).getTime() - new Date(a.at).getTime() || b.id.localeCompare(a.id)), page, 100);
+      return res.json({ success: true, data: { audits: objects(result.records), ...(result.pagination ? { pagination: result.pagination } : {}) } });
     } catch (error) {
       return next(error);
     }
@@ -4558,7 +3933,21 @@ router.get("/reports/payroll.csv", requireAuth, requireRoles("ADMIN"), async (re
     const records: any[] = usingMongo() ? await SalaryModel.find(filter).sort({ year: -1, month: -1 }) : db.salaries.filter((item) => !filter.guardId || (filter.guardId.$in ? filter.guardId.$in.includes(item.guardId) : item.guardId === filter.guardId));
     const guards: any[] = usingMongo() ? await GuardModel.find({ _id: { $in: [...new Set(records.map((item) => String(item.guardId)))] } }) : db.guards;
     const names = new Map(guards.map((item: any) => [recordId(item), item.name]));
-    return res.type("text/csv").send(csv([["Guard", "Period", "Payable Days", "Basic", "Overtime", "Allowances", "Deductions", "Net Payable", "Workflow", "Payment Reference"], ...records.map((item) => [names.get(String(item.guardId)) ?? "", `${item.month}/${item.year}`, String(item.payableDays ?? item.attendanceDays ?? 0), String(item.basicSalary ?? item.baseSalary ?? 0), String(item.overtimeAmount ?? 0), String(Number(item.allowances ?? 0) + Number(item.holidayPay ?? 0) + Number(item.arrears ?? 0)), String(Number(item.advances ?? 0) + Number(item.deductions ?? 0)), String(item.netPayable ?? item.finalSalary ?? 0), String(item.workflowStatus ?? item.status), String(item.paymentReference ?? "")] ]));
+    return res.type("text/csv").send(csv([
+      ["Guard", "Period", "Payable Days", "Basic", "Overtime", "Allowances", "Deductions", "Net Payable", "Workflow", "Payment Reference"],
+      ...records.map((item) => [
+        names.get(String(item.guardId)) ?? "",
+        `${item.month}/${item.year}`,
+        String(item.payableDays ?? item.attendanceDays ?? 0),
+        String(item.basicSalary ?? item.baseSalary ?? 0),
+        String(item.overtimeAmount ?? 0),
+        String(Number(item.allowances ?? 0) + Number(item.holidayPay ?? 0) + Number(item.arrears ?? 0)),
+        String(Number(item.advances ?? 0) + Number(item.deductions ?? 0)),
+        String(item.netPayable ?? item.finalSalary ?? 0),
+        String(item.workflowStatus ?? item.status),
+        String(item.paymentReference ?? ""),
+      ]),
+    ]));
   } catch (error) { return next(error); }
 });
 router.get("/reports/documents.csv", requireAuth, requireRoles("MAIN_SECURITY", "ADMIN"), async (req, res, next) => {
@@ -4576,7 +3965,19 @@ router.get("/reports/incidents.csv", requireAuth, requireRoles("MAIN_SECURITY", 
     const guards: any[] = usingMongo() ? await GuardModel.find({ _id: { $in: [...new Set(records.map((item) => String(item.guardId)).filter(Boolean))] } }) : db.guards;
     const sites: any[] = usingMongo() ? await SiteModel.find({ _id: { $in: [...new Set(records.map((item) => String(item.siteId)).filter(Boolean))] } }) : db.sites;
     const guardMap = new Map(guards.map((item: any) => [recordId(item), item.name])); const siteMap = new Map(sites.map((item: any) => [recordId(item), item.siteCode]));
-    return res.type("text/csv").send(csv([["Guard", "Site", "Category", "Severity", "Priority", "Status", "Captured At", "Due At"], ...records.map((item) => [guardMap.get(String(item.guardId)) ?? "", siteMap.get(String(item.siteId)) ?? "", item.category, item.severity ?? "", item.priority ?? "", item.status, new Date(item.capturedAt).toISOString(), item.dueAt ? new Date(item.dueAt).toISOString() : "")] ]));
+    return res.type("text/csv").send(csv([
+      ["Guard", "Site", "Category", "Severity", "Priority", "Status", "Captured At", "Due At"],
+      ...records.map((item) => [
+        guardMap.get(String(item.guardId)) ?? "",
+        siteMap.get(String(item.siteId)) ?? "",
+        item.category,
+        item.severity ?? "",
+        item.priority ?? "",
+        item.status,
+        new Date(item.capturedAt).toISOString(),
+        item.dueAt ? new Date(item.dueAt).toISOString() : "",
+      ]),
+    ]));
   } catch (error) { return next(error); }
 });
 router.get("/reports/site-coverage.csv", requireAuth, requireRoles("MAIN_SECURITY", "ADMIN"), async (req, res, next) => {

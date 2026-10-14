@@ -2,7 +2,7 @@
 
 Gujarati-first security agency operations platform for managing guards, sites, attendance evidence, rosters, incidents, documents, payroll, notifications and reports.
 
-> **Current attendance policy:** attendance is image-only and remains under human review. The application does not treat browser timestamps, image metadata, GPS, camera access or a photo itself as tamper-proof proof of physical presence.
+> **Current attendance policy:** guards send scheduled live-camera photos; all other guard data is read-only. Salary is calculated per received photo, with automatic missed-slot deductions. Browser camera access or image pixels do not independently prove physical presence.
 
 ![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)
 ![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=111827)
@@ -33,8 +33,8 @@ Gujarati-first security agency operations platform for managing guards, sites, a
 Elector Security supports day-to-day security-agency operations across multiple sites:
 
 - Admin creates and manages users, guards, sites, assignments and operational policies.
-- Main Security / Supervisor manages assigned-site operations and reviews attendance evidence.
-- Guards submit attendance images, view their duty information, report incidents and access their own records.
+- Main Security / Supervisor creates and maintains guards, per-photo rates and documents within assigned sites.
+- Guards capture and send four scheduled live-camera photos per day/night duty; all other guard records are read-only.
 - Management can track roster coverage, leave, replacements, overtime, incidents, documents, payroll and reports.
 - The React application is responsive and PWA-ready for mobile guard usage.
 - Gujarati and English UI support is available through the shared language state and translation dictionaries.
@@ -43,9 +43,9 @@ Elector Security supports day-to-day security-agency operations across multiple 
 
 | Role | Main capabilities | Privacy boundary |
 | --- | --- | --- |
-| **Admin** | Agency-wide users, guards, sites, assignments, attendance review, documents, payroll, audit, reports and settings | Full authorized management access; sensitive actions are server-authorized |
-| **Main Security / Supervisor** | Assigned-site dashboard, roster and coverage operations, attendance review, incidents, notifications and assigned-site reports | Site-scoped operational access; private salary and guard documents are not broadly exposed |
-| **Guard** | Own attendance, shifts/roster, leave-related actions, incidents, notifications, profile, own documents and own salary | Guard identity is derived from the authenticated account; another guard's private records are denied |
+| **Admin** | Agency-wide users, guards, sites, assignments, photo attendance, documents, payroll, audit, reports and settings | Full authorized management access; sensitive actions are server-authorized |
+| **Main Security / Supervisor** | Assigned-site dashboard, guard creation/edit, day/night shifts, photo rates, documents, attendance and incidents | Guard maintenance and private document access are limited to assigned sites |
+| **Guard** | Scheduled live-camera photo capture; read-only own attendance, shift, notifications, profile, documents and salary | Guard identity is derived from the authenticated account; another guard's private records are denied |
 
 The frontend hides unavailable menus for convenience, but the API is the security boundary. Every protected route must pass authentication, role and ownership/site-scope checks on the server.
 
@@ -56,7 +56,7 @@ The frontend hides unavailable menus for convenience, but the API is the securit
 - JWT-based authentication with HTTP-only cookies and bearer compatibility.
 - Short-lived access sessions and rotating server-side refresh sessions.
 - Login throttling/lockout, logout, logout-all and session revocation support.
-- Password change flow and `passwordChangeRequired` handling for newly created/reset guard accounts.
+- Management password APIs and `passwordChangeRequired` handling for newly created/reset guard accounts.
 - CSRF double-submit protection for cookie-authenticated state-changing requests.
 - Exact-origin/CORS checks, Helmet security headers and generic error responses.
 - Admin/security audit events for important authentication and management actions.
@@ -71,18 +71,19 @@ The frontend hides unavailable menus for convenience, but the API is the securit
 
 ### Attendance and shift evidence
 
-- Start, verify and end attendance flow for guards.
-- Existing image-upload/Base64 storage contract is preserved.
-- Active shift and attendance evidence are linked to the authenticated guard and assigned site.
-- All new attendance is submitted for `MANUAL_REVIEW`; an authorized Admin or Main Security reviewer explicitly verifies or rejects it.
-- Exact SHA-256 image hashing and server-side perceptual hashing provide duplicate/reuse review signals.
-- Similarity alone never automatically rejects attendance.
-- Client idempotency keys protect offline retries and repeated submissions.
-- Existing/historical records remain readable without requiring new metadata.
+- Day duty photos: 08:00, 12:00, 16:00, 20:00 IST.
+- Night duty photos: 20:00, 00:00, 04:00, 08:00 IST, anchored to the starting date.
+- Each slot has a two-hour server-enforced submission window.
+- Live camera capture only; no gallery picker or guard offline upload queue.
+- One photo per guard/date/slot, with idempotent retries.
+- No attendance approval or document verification.
+- Expired missing slots are automatically missed/unpaid; zero photos in a finished duty means absent.
+- Per-photo earnings and effective-dated rate/shift policies preserve historical salary.
+- Historical attendance remains readable.
 
 ### Roster and workforce operations
 
-- Roster publication, editing and guard acknowledgement.
+- Legacy roster publication/editing APIs remain; the new photo schedule follows the configured recurring guard day/night shift. Guards cannot acknowledge or alter rosters.
 - India business-date validation, overnight shifts and double-booking checks.
 - Leave requests with decision workflow.
 - Replacement suggestions and approval.
@@ -98,30 +99,28 @@ The frontend hides unavailable menus for convenience, but the API is the securit
 
 ### Documents and private media
 
-- Guard document upload and metadata management.
-- Document type, status, expiry, version chain, duplicate warning, sensitivity and reviewer decision fields.
+- Admin/Supervisor document upload; guard documents are read-only.
+- Manager-added documents are approved immediately; document type, filename and version data remain available.
 - Private preview/download routes with authorization and local-path containment checks.
-- Admin and guard-self access is preserved according to policy; private guard media is not public.
+- Admin, assigned-site Supervisor and guard-self access follow server scope checks; private media is not public.
 - Existing local upload paths and historical records remain readable when authorized.
 
 ### Payroll and reporting
 
-- Salary records retain the existing guard/month/year compatibility model.
-- Payroll preview/run uses explicit company inputs and integer paise arithmetic.
-- Approval flow: `REVIEW -> APPROVED -> LOCKED -> PAID -> RECONCILED`.
-- Locked/paid records cannot be silently changed.
-- Payslips are private printable HTML; the browser can save/print them as PDF without another PDF dependency.
-- CSV reports cover attendance, salaries/payroll, documents, incidents and site coverage.
-- CSV cells are protected against spreadsheet formula injection.
+- The current photo ledger calculates received/missed photos, worked/full/partial/absent days and earnings in integer paise.
+- Admin records credited salary with an external payment reference after the month closes.
+- Credited photo payroll snapshots cannot be paid twice or silently recalculated.
+- Historical salary rows and existing legacy API contracts remain preserved.
+- Private printable payslips are available for credited records.
+- Existing historical CSV reports remain available; current photo data is shown in dedicated attendance and payroll pages.
 
 ### Notifications and PWA support
 
-- In-app notifications with read/read-all handling.
-- Verification notifications, acknowledgement and delivery telemetry.
-- Optional Web Push using VAPID credentials.
-- Scheduled operational reminders and notification preferences.
-- Service worker generated by `vite-plugin-pwa`.
-- Offline attendance evidence uses an owner-scoped IndexedDB queue and retries with the same idempotency key.
+- Guards can read in-app notifications; notification write actions are unavailable to them.
+- Slot reminders point guards to the live-camera home screen.
+- Existing Web Push delivery uses VAPID credentials and authorized subscriptions.
+- Service worker is generated by vite-plugin-pwa.
+- Timed live attendance must arrive online before the deadline; no guard offline capture queue is drained.
 
 ### Localization and UI
 
@@ -132,37 +131,15 @@ The frontend hides unavailable menus for convenience, but the API is the securit
 
 ## Attendance workflow
 
-```text
-Guard login
-   -> server resolves current guard and assigned site
-   -> guard selects/captures an attendance image
-   -> browser converts the image to Base64
-   -> POST /api/attendance/:kind with clientRecordId
-   -> server validates guard, site, shift, payload and size
-   -> server records receipt time and image hashes
-   -> attendance remains MANUAL_REVIEW / needs_review
-   -> Admin or assigned Main Security reviews evidence
-   -> verified or rejected with reviewer and reason
-```
+Guard login -> view configured day/night slot -> live camera frame -> capture session and photo submission -> server checks ownership, slot deadline and JPEG -> one recorded slot -> automatic per-photo earnings.
 
-### Attendance data rules
+The camera session lasts at most two minutes and never extends the slot deadline. Window opening is inclusive and closing is exclusive. A night duty belongs to the date it starts. No GPS or live tracking is used, and browser camera capture does not prove physical presence.
 
-- `capturedAtClient` is optional device-reported evidence and is not independently trusted.
-- `receivedAtServer` / server attendance time is authoritative for server receipt records.
-- Guard identity, site and ownership are resolved from the authenticated session and server data.
-- Exact duplicate image matches and perceptual similarity matches are stored as review signals.
-- A similar image is not automatically rejected because legitimate repeated site imagery can exist.
-- Oversized image payloads are rejected with an appropriate `413 Payload Too Large` response.
-- The current approved flow does **not** require GPS, geofencing, live camera access or a Canvas GPS stamp.
-- Browser upload, timestamp, EXIF and image pixels can be modified; reviewers and operational controls remain necessary.
+The camera needs HTTPS on mobile (localhost works on the development computer). An HTTP LAN address cannot normally request the camera.
 
-### Offline attendance
+Salary is received-photo count at each applicable rate; missed photos are unpaid. A finished shift with zero photos is absent. Admin and assigned-site Supervisors set the per-photo rate and shift; future edits preserve previous earnings. Existing guards need an explicit photo policy saved before this calculation starts.
 
-1. The guard submits while offline.
-2. Evidence is stored in the browser's owner-scoped IndexedDB queue.
-3. When the connection returns, the queue retries in order.
-4. The original `clientRecordId` is reused so a retry does not intentionally create another attendance record.
-5. Failed retries remain visible as pending/error states instead of disappearing silently.
+Guards see worked/full/partial/absent days, photo counts, deductions and credited/not-credited status. Admin records an external payment with a reference after the month closes; the app does not transfer money.
 
 ## Security and privacy
 
@@ -311,12 +288,12 @@ All application routes are mounted below `/api` unless noted otherwise.
 | Health | `/health`, `/health/live`, `/health/ready` |
 | Auth | `/auth/login`, `/auth/logout`, `/auth/refresh`, `/auth/me`, `/auth/change-password` |
 | Users/guards/sites | `/users`, `/guards`, `/guards/import`, `/guards/:id/lifecycle`, `/sites` |
-| Attendance | `/attendance/start`, `/attendance/verify`, `/attendance/end`, `/attendance/:id/verify`, `/attendance/today`, `/attendance/history` |
+| Attendance | /photo-duty/current, /photo-duty/days, /photo-duty/capture-session, /photo-duty/capture, /photo-duty/photo/:id, /attendance/history |
 | Shifts/rosters | `/shifts/mine`, `/rosters`, `/leave-requests`, `/replacements`, `/overtime` |
 | Operations | `/operations/dashboard`, `/incidents` |
 | Documents | `/guards/:id/documents`, `/documents`, `/documents/:id/preview`, `/documents/:id/download` |
-| Payroll | `/salaries`, `/payroll/preview`, `/payroll/run`, `/payroll`, `/payroll/:id/payslip` |
-| Notifications | `/notifications`, `/push/subscribe`, verification request endpoints |
+| Payroll | /photo-payroll, /photo-payroll/credit/:id, /photo-payroll/payslip/:id; historical /payroll routes remain |
+| Notifications | /notifications (guard read-only); management notification endpoints remain |
 | Reports/audit | `/reports/*.csv`, `/audit` |
 
 The existing route contracts and historical fields are intentionally retained. New fields are optional unless the endpoint's validation contract explicitly requires them.
@@ -334,7 +311,7 @@ Also verify:
 
 - Login, refresh, logout, logout-all, password change and inactive-account denial.
 - Guard ownership, supervisor assigned-site scope and Admin boundaries.
-- Attendance start/verify/end, duplicate retry, oversized payload (`413`), image hash flags and manual review.
+- Day/night slot deadlines, live camera capture, duplicate retry, missed-photo salary and read-only guard restrictions.
 - Offline queue retry, account switching and stale session handling.
 - Roster conflicts, leave/replacement/overtime decisions and incident lifecycle.
 - Private document preview/download and private payslip access.
@@ -347,7 +324,7 @@ Focused architecture/RBAC checks are documented in `docs/VERIFICATION_01_03.md`.
 ## Known limitations
 
 - Browser image uploads, Base64 data, EXIF, client timestamps and offline queues are client-controlled evidence.
-- The current approved attendance flow does not implement live camera enforcement, GPS/geofencing, physical challenge codes or automatic verification.
+- The guard UI requires live camera capture and server-bound sessions. This is not hardware camera attestation; GPS/geofencing and manual attendance approval are absent.
 - Perceptual hashing is a similarity signal, not identity proof; a legitimate repeated image can still be similar.
 - Unsupported/corrupt image formats may receive exact payload validation without a usable perceptual hash.
 - Local private media storage needs backup, retention and operational monitoring before production use.
@@ -358,7 +335,7 @@ Focused architecture/RBAC checks are documented in `docs/VERIFICATION_01_03.md`.
 ## Project documentation
 
 - [`docs/FEATURE_MATRIX.md`](docs/FEATURE_MATRIX.md) — module coverage, routes, models and known gaps.
-- [`docs/ATTENDANCE_IMAGE_REVIEW.md`](docs/ATTENDANCE_IMAGE_REVIEW.md) — image review, duplicate detection and manual verification contract.
+- [`docs/ATTENDANCE_IMAGE_REVIEW.md`](docs/ATTENDANCE_IMAGE_REVIEW.md) — live-camera slots, receipt deadlines and per-photo attendance contract.
 - [`docs/AUTHORIZATION.md`](docs/AUTHORIZATION.md) — role policy, ownership, supervisor site scope and rollout safeguards.
 - [`docs/OPERATIONS_MODULES.md`](docs/OPERATIONS_MODULES.md) — roster, leave, replacements, overtime and incident operations.
 - [`docs/DOCUMENTS_PAYROLL_REPORTING.md`](docs/DOCUMENTS_PAYROLL_REPORTING.md) — document, payroll and reporting workflows.
