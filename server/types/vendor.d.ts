@@ -14,6 +14,13 @@ declare module 'web-push' {
 
 declare module 'pngjs' {
   export class PNG {
-    static sync: { read(buffer: Buffer): { width: number; height: number; data: Buffer } };
+    constructor(options: { width: number; height: number });
+    width: number;
+    height: number;
+    data: Buffer;
+    static sync: {
+      read(buffer: Buffer): { width: number; height: number; data: Buffer };
+      write(image: { width: number; height: number; data: Buffer }): Buffer;
+    };
   }
 }

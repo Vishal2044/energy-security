@@ -223,7 +223,12 @@ async function main() {
   }
   if (apply) {
     // Detect conflicting natural keys before beginning the resumable insert.
-    for (const [model, field] of [[models.UserModel, 'email'], [models.GuardModel, 'employeeCode'], [models.SiteModel, 'siteCode']] as const) {
+    const naturalKeys: Array<[mongoose.Model<any>, string]> = [
+      [models.UserModel, 'email'],
+      [models.GuardModel, 'employeeCode'],
+      [models.SiteModel, 'siteCode'],
+    ];
+    for (const [model, field] of naturalKeys) {
       for (const record of groups.get(model) ?? []) {
         const existing: any = await model.findOne({ [field]: record[field] }).lean();
         assert(!existing || existing._id === record._id, `Existing ${field} collision; no records changed.`);

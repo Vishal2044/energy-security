@@ -67,7 +67,7 @@ import { deliverPushToUser } from "./services/push.js";
 import { createNotification, createNotifications } from "./services/notifications.js";
 import { ROLES, type AttendanceType } from "../shared/types.js";
 import { attendancePayloadSchema, MAX_ATTENDANCE_PHOTO_BASE64_LENGTH, type AttendancePayload } from "../shared/attendance.js";
-import { canAccessSite, canReadOperational, canReadOwnedPrivate, canReadPrivate, canManageGuard, canReadDocument } from "../shared/permissions.js";
+import { canAccessSite, canReadOperational, canReadOwnedPrivate, canReadPrivate, canReadProfile, canManageGuard, canReadDocument } from "../shared/permissions.js";
 import { indiaBusinessDate, indiaDayUtcRange } from "../shared/time.js";
 import { createAuthorizationMiddleware } from "./authorization/middleware.js";
 import { matchRoutePolicy, type ResourceKind } from "./authorization/routes.js";
@@ -2122,7 +2122,7 @@ router.post("/guards/import", requireAuth, requireRoles("ADMIN"), async (req, re
       const passwordHash = await bcrypt.hash(temporaryPassword, 10);
       const guardValue = { name: row.name, employeeCode: row.employeeCode, mobile: row.mobile, assignedSite: row.assignedSite, joiningDate: row.joiningDate ? new Date(row.joiningDate) : undefined, employmentType: row.employmentType, nameGujarati: row.name, employmentStatus: "ACTIVE" as const, monthlySalary: 24000, preferredLanguage: "gu" as const, documentCount: 0, bank: { bankName: "", accountNumber: "XXXXXXXX", ifscCode: "" }, policeVerificationStatus: "PENDING" };
       if (usingMongo()) { const guard: any = await GuardModel.create({ _id: makeId("guard"), ...guardValue }); await UserModel.create({ _id: makeId("user"), email, passwordHash, name: row.name, role: "GUARD", guardId: guard._id, passwordChangeRequired: true, preferredLanguage: "gu", active: true }); if (row.assignedSite) await SiteModel.updateOne({ _id: row.assignedSite }, { $addToSet: { assignedGuards: guard._id } }); created.push(String(guard._id)); }
-      else { const guard: GuardRecord = { id: newId("guard"), ...guardValue, joiningDate: row.joiningDate, employmentStatus: "ACTIVE", preferredLanguage: "gu", documentCount: 0, bank: { bankName: "", accountNumber: "XXXXXXXX", ifscCode: "" } }; db.guards.push(guard); db.users.push({ id: newId("user"), email, passwordHash, name: row.name, role: "GUARD", guardId: guard.id, passwordChangeRequired: true, preferredLanguage: "gu", active: true }); if (row.assignedSite) db.sites.find((site) => site.id === row.assignedSite)?.assignedGuards.push(guard.id); created.push(guard.id); }
+      else { const guard: GuardRecord = { id: newId("guard"), ...guardValue, village: "", district: "", joiningDate: row.joiningDate, employmentStatus: "ACTIVE", preferredLanguage: "gu", documentCount: 0, bank: { bankName: "", accountNumber: "XXXXXXXX", ifscCode: "" } }; db.guards.push(guard); db.users.push({ id: newId("user"), email, passwordHash, name: row.name, role: "GUARD", guardId: guard.id, passwordChangeRequired: true, preferredLanguage: "gu", active: true }); if (row.assignedSite) db.sites.find((site) => site.id === row.assignedSite)?.assignedGuards.push(guard.id); created.push(guard.id); }
       credentials.push({ employeeCode: row.employeeCode, email, temporaryPassword });
     }
     await recordAudit(req.user!.id, "GUARDS_IMPORTED", "Guard", "bulk", { count: created.length });
