@@ -35,6 +35,10 @@ export const env = {
 
 if (!['local', 'mongo'].includes(env.mediaStorageDriver)) throw new Error('Invalid MEDIA_STORAGE_DRIVER: use local or mongo');
 if (!Number.isInteger(env.port) || env.port < 1 || env.port > 65535) throw new Error('Invalid PORT');
+// The driver otherwise silently chooses "test", potentially writing into another app.
+if (env.mongoUri && !/^mongodb(?:\+srv)?:\/\/[^/?#]+\/[^/?#\s]+(?:\?|$)/.test(env.mongoUri)) {
+  throw new Error('MONGODB_URI must include an explicit database name after the hostname (for this project: /dg-energy).');
+}
 
 const insecureSecrets = new Set([
   'development-access-secret-change-me',

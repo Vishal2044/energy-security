@@ -19,6 +19,9 @@ test('Render derives its origin and durable media defaults without loading the l
   const invalid = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', "await import('./server/config/env.ts')"], { env: { ...childEnv, CLIENT_ADDITIONAL_ORIGINS: 'http://untrusted.example.test' }, encoding: 'utf8', timeout: 30000 });
   assert.notEqual(invalid.status, 0);
   assert.match(invalid.stderr, /HTTPS CLIENT_URL/);
+  const missingDatabase = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', "await import('./server/config/env.ts')"], { env: { ...childEnv, MONGODB_URI: 'mongodb://127.0.0.1/?retryWrites=true' }, encoding: 'utf8', timeout: 30000 });
+  assert.notEqual(missingDatabase.status, 0);
+  assert.match(missingDatabase.stderr, /explicit database name/);
 });
 
 test('production admin setup preserves accounts and rejects unsafe bootstrap/reset', async (t) => {
