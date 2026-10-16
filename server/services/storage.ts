@@ -1,13 +1,21 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { Express } from 'express';
+import type { Express, Response } from 'express';
+import mongoose from 'mongoose';
+import { pipeline } from 'node:stream/promises';
 import { env } from '../config/env.js';
 
 const MAX_FILE_SIZE = 8 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION = 6000;
 const MIME_EXTENSIONS: Record<string, string> = { 'application/pdf': '.pdf', 'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp' };
 export class UploadValidationError extends Error { constructor(message = 'INVALID_UPLOAD') { super(message); this.name = 'UploadValidationError'; } }
+
+const mongoFileId = (key: string) => /^gridfs:[a-f0-9]{24}$/.test(key) ? new mongoose.mongo.ObjectId(key.slice(7)) : undefined;
+function mediaBucket() {
+  if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) throw new Error('MEDIA_DATABASE_UNAVAILABLE');
+  return new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'privateMedia' });
+}
 
 function detectedMime(buffer: Buffer) {
   if (buffer.subarray(0, 5).toString('ascii') === '%PDF-') return 'application/pdf';
@@ -47,9 +55,19 @@ function validateFile(file: Express.Multer.File) {
 
 export async function saveLocalUpload(file: Express.Multer.File) {
   const mimeType = validateFile(file);
-  await fs.mkdir(env.mediaStorageRoot, { recursive: true, mode: 0o750 });
   const safeName = String(file.originalname ?? 'upload').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-180);
   const extension = MIME_EXTENSIONS[mimeType];
+  if (env.mediaStorageDriver === 'mongo') {
+    const upload = mediaBucket().openUploadStream(`${randomUUID()}${extension}`, { metadata: { mimeType, originalName: safeName } });
+    try {
+      await new Promise<void>((resolve, reject) => { upload.once('error', reject); upload.once('finish', resolve); upload.end(file.buffer); });
+    } catch (error) {
+      await upload.abort().catch(() => undefined);
+      throw error;
+    }
+    return { storageKey: `gridfs:${upload.id.toHexString()}`, originalName: safeName || `upload${extension}`, mimeType, size: file.buffer.length };
+  }
+  await fs.mkdir(env.mediaStorageRoot, { recursive: true, mode: 0o750 });
   const target = path.join(env.mediaStorageRoot, `${randomUUID()}${extension}`);
   await fs.writeFile(target, file.buffer, { flag: 'wx', mode: 0o640 });
   return { storageKey: target, originalName: safeName || `upload${extension}`, mimeType, size: file.size };
@@ -57,10 +75,46 @@ export async function saveLocalUpload(file: Express.Multer.File) {
 
 const storageRoots = () => [...new Set([path.resolve(env.mediaStorageRoot), path.resolve('uploads')])];
 export function resolveStoredUpload(storageKey: string) {
+  if (!storageKey || storageKey.startsWith('gridfs:')) return undefined;
   const candidate = path.resolve(storageKey);
   return storageRoots().some((root) => candidate.startsWith(`${root}${path.sep}`)) ? candidate : undefined;
 }
+export function isStoredUpload(storageKey: string) { return Boolean(mongoFileId(storageKey) || resolveStoredUpload(storageKey)); }
+
+/** Call only after the route has authorized access to the owning record. */
+export async function sendStoredUpload(res: Response, storageKey: string, downloadName?: string) {
+  res.setHeader('Cache-Control', 'private, no-store');
+  const missing = () => {
+    res.removeHeader('Content-Disposition');
+    return res.status(404).type('json').json({ success: false, error: 'MEDIA_FILE_NOT_FOUND' });
+  };
+  const id = mongoFileId(storageKey);
+  if (id) {
+    const bucket = mediaBucket();
+    const file = await bucket.find({ _id: id }).next();
+    if (!file) return missing();
+    if (downloadName) res.attachment(downloadName);
+    res.type(String(file.metadata?.mimeType ?? 'application/octet-stream'));
+    res.setHeader('Content-Length', file.length);
+    await pipeline(bucket.openDownloadStream(id), res);
+    return;
+  }
+  const resolved = resolveStoredUpload(storageKey);
+  if (!resolved) return missing();
+  return new Promise<void>((resolve, reject) => {
+    const complete = (error?: Error) => error ? reject(error) : resolve();
+    if (downloadName) res.download(resolved, downloadName, complete);
+    else res.sendFile(resolved, complete);
+  });
+}
+
 export async function deleteLocalUpload(storageKey?: string) {
+  const id = storageKey ? mongoFileId(storageKey) : undefined;
+  if (id) {
+    const bucket = mediaBucket();
+    if (await bucket.find({ _id: id }).next()) await bucket.delete(id);
+    return;
+  }
   const resolved = storageKey ? resolveStoredUpload(storageKey) : undefined;
   if (resolved) await fs.rm(resolved, { force: true });
 }

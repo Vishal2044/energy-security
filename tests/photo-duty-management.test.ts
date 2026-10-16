@@ -81,3 +81,11 @@ test('guard cannot alter their profile or documents through the actual API route
   assert.equal((await request('GUARD', '/guards/guard-a/documents', 'POST', {})).status, 403);
   assert.equal(db.guards[0].photoRate, undefined); assert.equal(db.documents.length, 2);
 });
+
+test('opaque GridFS media references retain guard ownership and supervisor site checks', async () => {
+  db.documents[1].storageKey = 'gridfs:0123456789abcdef01234567';
+  for (const role of ['GUARD', 'MAIN_SECURITY']) {
+    assert.equal((await request(role, '/documents/doc-b/preview')).status, 403);
+    assert.equal((await request(role, '/documents/doc-b/download')).status, 403);
+  }
+});

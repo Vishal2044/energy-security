@@ -61,7 +61,7 @@ import {
   verifyPassword,
 } from "./services/auth.js";
 import { clearLoginFailures, loginGate, recordLoginFailure } from "./services/loginSecurity.js";
-import { deleteLocalUpload, saveLocalUpload, resolveStoredUpload } from "./services/storage.js";
+import { deleteLocalUpload, saveLocalUpload, isStoredUpload, sendStoredUpload } from "./services/storage.js";
 import { analyzeAttendancePhoto, hammingDistance, reviewFlag, type AttendanceReviewFlag } from "./services/imageAnalysis.js";
 import { deliverPushToUser } from "./services/push.js";
 import { createNotification, createNotifications } from "./services/notifications.js";
@@ -982,22 +982,16 @@ router.get("/users/:id/photo", requireAuth, async (req, res, next) => {
       : db.users.find((item) => item.id === id);
     const guard = user?.role === "GUARD" && user.guardId ? await findGuard(String(user.guardId)) : undefined;
     const storedPath = String(user?.profilePhoto ?? guard?.profilePhoto ?? "");
-    const resolvedPath = resolveStoredUpload(storedPath);
+    const validStorageKey = isStoredUpload(storedPath);
     if (
       !user ||
       !storedPath ||
-      !resolvedPath
+      !validStorageKey
     )
       return res
         .status(404)
         .json({ success: false, error: "PROFILE_PHOTO_NOT_FOUND" });
-    return res.sendFile(
-      resolvedPath,
-      { headers: { "Cache-Control": "private, no-store" } },
-      (error) => {
-        if (error && !res.headersSent) next(error);
-      },
-    );
+    return await sendStoredUpload(res, storedPath);
   } catch (error) {
     return next(error);
   }
@@ -1476,22 +1470,16 @@ router.get("/guards/:id/photo", requireAuth, async (req, res, next) => {
       return res.status(403).json({ success: false, error: "FORBIDDEN" });
     const guard: any = await findGuard(id);
     const storedPath = String(guard?.profilePhoto ?? "");
-    const resolvedPath = resolveStoredUpload(storedPath);
+    const validStorageKey = isStoredUpload(storedPath);
     if (
       !guard ||
       !storedPath ||
-      !resolvedPath
+      !validStorageKey
     )
       return res
         .status(404)
         .json({ success: false, error: "PROFILE_PHOTO_NOT_FOUND" });
-    return res.sendFile(
-      resolvedPath,
-      { headers: { "Cache-Control": "private, no-store" } },
-      (error) => {
-        if (error && !res.headersSent) next(error);
-      },
-    );
+    return await sendStoredUpload(res, storedPath);
   } catch (error) {
     return next(error);
   }
@@ -3534,12 +3522,12 @@ router.get(
         : db.documents.find((item) => item.id === id);
       const allowed = document && await canViewDocumentForRequest(req, document);
       const storedPath = String(document?.storageKey ?? "");
-      const resolvedPath = resolveStoredUpload(storedPath);
+      const validStorageKey = isStoredUpload(storedPath);
       if (
         !document ||
         !allowed ||
         !storedPath ||
-        !resolvedPath
+        !validStorageKey
       )
         return res
           .status(document ? 403 : 404)
@@ -3559,13 +3547,7 @@ router.get(
       document.lastAccessedAt = new Date();
       if (usingMongo()) await document.save();
       await recordAudit(req.user!.id, "DOCUMENT_PREVIEWED", "Document", id, { guardId: String(document.guardId) });
-      return res.sendFile(
-        resolvedPath,
-        { headers: { "Cache-Control": "private, no-store" } },
-        (error) => {
-          if (error && !res.headersSent) next(error);
-        },
-      );
+      return await sendStoredUpload(res, storedPath);
     } catch (error) {
       return next(error);
     }
@@ -3601,14 +3583,14 @@ router.get(
         return res
           .status(document ? 403 : 404)
           .json({ success: false, error: document ? "FORBIDDEN" : "DOCUMENT_FILE_NOT_FOUND" });
-      const resolvedPath = resolveStoredUpload(String(document.storageKey));
-      if (!resolvedPath)
+      const storedPath = String(document.storageKey);
+      if (!isStoredUpload(storedPath))
         return res.status(403).json({ success: false, error: "FORBIDDEN" });
       res.setHeader("Cache-Control", "private, no-store");
       document.lastAccessedAt = new Date();
       if (usingMongo()) await document.save();
       await recordAudit(req.user!.id, "DOCUMENT_DOWNLOADED", "Document", routeParam(req.params.id), { guardId: String(document.guardId) });
-      return res.download(resolvedPath, document.originalName);
+      return await sendStoredUpload(res, storedPath, document.originalName || 'document');
     } catch (error) {
       return next(error);
     }

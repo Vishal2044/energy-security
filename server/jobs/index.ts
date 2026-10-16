@@ -5,6 +5,7 @@ import { IncidentModel, SalaryModel } from '../models/index.js';
 import { db } from '../services/memory.js';
 import { createNotification, retryNotifications } from '../services/notifications.js';
 import { indiaBusinessDate } from '../../shared/time.js';
+import { env } from '../config/env.js';
 
 async function photoSlotReminders(now: Date) {
   const guards = await scopedPhotoGuards({ id: 'notification-job', name: 'Duty reminders', email: '', role: 'ADMIN' });
@@ -27,5 +28,15 @@ export async function runNotificationJobs(now = new Date()) { await photoSlotRem
 
 /** Absence and earnings are derived from expired photo slots; no approval job is needed. */
 export function startJobs() {
-  cron.schedule('*/15 * * * *', () => { void runNotificationJobs().catch((error) => console.error('Notification job failed.', error)); });
+  let running = false;
+  const run = async () => {
+    if (running || (env.nodeEnv === 'production' && !isDatabaseConnected())) return;
+    running = true;
+    try { await runNotificationJobs(); }
+    catch (error) { console.error('Notification job failed.', error); }
+    finally { running = false; }
+  };
+  // Re-check current reminders on startup after a restart or free-service wake-up.
+  void run();
+  return cron.schedule('*/15 * * * *', () => { void run(); });
 }

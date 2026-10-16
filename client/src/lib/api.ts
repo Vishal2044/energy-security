@@ -3,7 +3,7 @@ import type { ApiError } from '../../../shared/types';
 
 export const api = axios.create({ baseURL: import.meta.env?.VITE_API_URL ?? '/api', withCredentials: true });
 let sessionGeneration = 0;
-let refreshPromise: Promise<unknown> | undefined;
+let refreshPromise: { generation: number; promise: Promise<unknown> } | undefined;
 type SessionRequestConfig = InternalAxiosRequestConfig & { dgSessionGeneration?: number; dgRefreshRetry?: boolean };
 export const currentApiSession = () => sessionGeneration;
 export function advanceApiSession() { sessionGeneration += 1; }
@@ -12,7 +12,7 @@ function shouldSendCsrf(method?: string) { return ['post', 'put', 'patch', 'dele
 
 api.interceptors.request.use((config) => {
   const tracked = config as SessionRequestConfig;
-  tracked.dgSessionGeneration = sessionGeneration;
+  tracked.dgSessionGeneration ??= sessionGeneration;
   if (shouldSendCsrf(config.method)) {
     const token = csrfToken();
     if (token) config.headers.set('X-CSRF-Token', token);
@@ -28,10 +28,17 @@ api.interceptors.response.use((response) => response, async (error: AxiosError<P
   const data = error.response?.data;
   const config = error.config as SessionRequestConfig | undefined;
   const isAuthEndpoint = config?.url === '/auth/login' || config?.url === '/auth/refresh' || config?.url === '/auth/logout';
-  if (error.response?.status === 401 && config && !isAuthEndpoint && !config.dgRefreshRetry) {
+  if (error.response?.status === 401 && config && config.dgSessionGeneration === sessionGeneration && !isAuthEndpoint && !config.dgRefreshRetry) {
     config.dgRefreshRetry = true;
-    refreshPromise ??= api.post('/auth/refresh').finally(() => { refreshPromise = undefined; });
-    try { await refreshPromise; return api(config); } catch { /* session-expired event below */ }
+    if (!refreshPromise || refreshPromise.generation !== sessionGeneration) {
+      const refresh = { generation: sessionGeneration, promise: Promise.resolve<unknown>(undefined) };
+      refresh.promise = api.post('/auth/refresh').finally(() => { if (refreshPromise === refresh) refreshPromise = undefined; });
+      refreshPromise = refresh;
+    }
+    try {
+      await refreshPromise.promise;
+      if (config.dgSessionGeneration === sessionGeneration) return api(config);
+    } catch { /* session-expired event below */ }
   }
   // A response from an earlier account must not log out the newly signed-in user.
   if (error.response?.status === 401 && !isAuthEndpoint && config?.dgSessionGeneration === sessionGeneration && typeof window !== 'undefined') window.dispatchEvent(new Event('dg-session-expired'));

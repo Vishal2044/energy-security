@@ -4,6 +4,7 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import path from 'node:path';
 import fs from 'node:fs';
+import mongoose from 'mongoose';
 import { randomUUID } from 'node:crypto';
 import { env } from './config/env.js';
 import { connectDatabase, isDatabaseConnected } from './db.js';
@@ -14,6 +15,8 @@ import { errorHandler, notFound } from './middleware/error.js';
 import { requestSecurity } from './middleware/security.js';
 
 const app = express();
+// Render terminates TLS at its reverse proxy; trust only the nearest hop.
+if (process.env.RENDER === 'true') app.set('trust proxy', 1);
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cors({ origin: (origin, callback) => callback(null, !origin || env.clientOrigins.includes(origin)), credentials: true }));
 app.use(express.json({ limit: '12mb' }));
@@ -35,10 +38,11 @@ app.use('/api', notFound);
 
 if (env.nodeEnv === 'production') {
   const clientDist = path.resolve('client/dist');
-  if (fs.existsSync(clientDist)) {
-    app.use(express.static(clientDist));
-    app.get('*', (_req, res) => res.sendFile(path.join(clientDist, 'index.html')));
-  }
+  if (!fs.existsSync(path.join(clientDist, 'index.html'))) throw new Error('CLIENT_BUILD_MISSING: run npm run build before npm start');
+  app.use(express.static(clientDist, { setHeaders: (res, file) => {
+    res.setHeader('Cache-Control', file.includes(`${path.sep}assets${path.sep}`) ? 'public, max-age=31536000, immutable' : 'no-cache');
+  } }));
+  app.get('*', (_req, res) => { res.setHeader('Cache-Control', 'no-cache'); res.sendFile(path.join(clientDist, 'index.html')); });
 }
 app.use(notFound);
 app.use(errorHandler);
@@ -54,6 +58,25 @@ if (env.nodeEnv === 'production' && !databaseConnected) {
   console.error('Production startup requires MongoDB.');
   process.exit(1);
 }
-const seedMode = await seedDatabase();
-startJobs();
-app.listen(env.port, () => console.log(`Elector API running on http://localhost:${env.port} (${seedMode})`));
+try {
+  const seedMode = await seedDatabase();
+  const jobs = startJobs();
+  const server = app.listen(env.port, '0.0.0.0', () => console.log(`DG Energy running on port ${env.port} (${seedMode})`));
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    jobs.stop();
+    const timeout = setTimeout(() => process.exit(1), 25000);
+    timeout.unref();
+    server.close(() => {
+      void mongoose.disconnect().then(() => { clearTimeout(timeout); process.exit(0); }).catch(() => process.exit(1));
+    });
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : 'Production initialization failed.');
+  await mongoose.disconnect();
+  process.exit(1);
+}

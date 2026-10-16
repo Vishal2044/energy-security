@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: dg-energy-security
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run check && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health/ready
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: VITE_API_URL
+        value: /api
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: MEDIA_STORAGE_DRIVER
+        value: mongo
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      # Required only for a fresh database without an active administrator.
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false

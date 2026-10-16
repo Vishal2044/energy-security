@@ -54,6 +54,29 @@ function fakeCaptures(rows: PendingCapture[]) {
   Object.defineProperty(fixtureWindow, 'indexedDB', { configurable: true, value: indexedDB });
   return deleted;
 }
+
+test('an account change while refresh is pending prevents replay under the new account', async () => {
+  let releaseRefresh!: () => void;
+  let refreshStarted!: () => void;
+  const started = new Promise<void>((resolve) => { refreshStarted = resolve; });
+  let replays = 0;
+  api.defaults.adapter = (config) => {
+    if (config.url === '/auth/refresh') return new Promise((resolve) => {
+      releaseRefresh = () => resolve({ config, status: 200, statusText: 'OK', headers: {}, data: { success: true } });
+      refreshStarted();
+    });
+    if ((config as any).dgRefreshRetry) replays += 1;
+    return Promise.reject(unauthorized(config));
+  };
+  try {
+    const pending = api.get('/sites').catch((error: Error) => error);
+    await started;
+    advanceApiSession();
+    releaseRefresh();
+    await pending;
+    assert.equal(replays, 0);
+  } finally { api.defaults.adapter = originalAdapter; }
+});
 const captures = (): PendingCapture[] => [
   { clientRecordId: 'a_end', ownerId: 'guard_a', endpoint: '/attendance/end', createdAt: '2026-10-10T04:00:00Z', body: { photo: 'private-a-end' } },
   { clientRecordId: 'b_start', ownerId: 'guard_b', endpoint: '/attendance/start', createdAt: '2026-10-10T02:00:00Z', body: { photo: 'private-b-start' } },

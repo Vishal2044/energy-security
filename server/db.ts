@@ -4,7 +4,7 @@ import { env } from './config/env.js';
 export async function connectDatabase(): Promise<boolean> {
   if (!env.mongoUri) return false;
   try {
-    await mongoose.connect(env.mongoUri, { serverSelectionTimeoutMS: 2500 });
+    await mongoose.connect(env.mongoUri, { serverSelectionTimeoutMS: env.nodeEnv === 'production' ? 30000 : 2500 });
     return true;
   }
   catch (error) {

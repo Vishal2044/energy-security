@@ -3,6 +3,8 @@ import { UploadValidationError } from '../services/storage.js';
 import { PaginationError } from '../services/pagination.js';
 export const notFound = (_req: Request, res: Response) => res.status(404).json({ success: false, error: 'NOT_FOUND' });
 export const errorHandler: ErrorRequestHandler = (error, req, res, _next) => {
+  if (res.headersSent) { _next(error); return; }
+  if (error?.code === 'ENOENT' || error?.status === 404) return res.status(404).type('json').json({ success: false, error: 'MEDIA_FILE_NOT_FOUND' });
   if (error instanceof PaginationError) return res.status(400).json({ success: false, error: error.message });
   if (error instanceof UploadValidationError) return res.status(400).json({ success: false, error: error.message });
   if (error?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ success: false, error: 'FILE_TOO_LARGE' });

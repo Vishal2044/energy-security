@@ -4,7 +4,7 @@ declare module 'bcryptjs' {
 }
 
 declare module 'node-cron' {
-  export function schedule(expression: string, handler: () => void): unknown;
+  export function schedule(expression: string, handler: () => void): { stop(): void };
 }
 
 declare module 'web-push' {

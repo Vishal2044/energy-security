@@ -248,7 +248,40 @@ Copy `.env.example` to `.env`. Values below are the supported configuration surf
 
 ### Production configuration requirements
 
-Set `NODE_ENV=production`, a real MongoDB URI, strong unique secrets, exact HTTPS `CLIENT_URL`, `COOKIE_SECURE=true` and a private writable `MEDIA_STORAGE_ROOT`. Production startup should fail closed when required persistence/security configuration is missing.
+Set `NODE_ENV=production`, a real MongoDB URI, strong distinct JWT secrets and HTTPS origins. Secure cookies and private MongoDB GridFS media storage are the production defaults. Local development still uses `uploads`. `MEDIA_STORAGE_ROOT` is required only when explicitly selecting local storage outside Render.
+
+### Render: one service, one port
+
+Connect this repository using Render **New > Blueprint** and select the branch containing `render.yaml`. The Blueprint creates one free Node Web Service, builds both applications and starts Express on Render's `PORT`. Express serves `/api/*` and the React frontend from `client/dist`; no separate frontend service, Vite process, CORS wildcard or second port is needed. Subsequent pushes to the linked branch trigger deployment. See [Render Blueprint configuration](https://render.com/docs/blueprint-spec).
+
+Supply `MONGODB_URI` with the exact Atlas database name (this project's existing database is `dg-energy`) and allow the service to connect using Atlas network access settings. The database user needs read/write access to that database, including the `privateMedia.files` and `privateMedia.chunks` collections. GridFS bytes count toward database storage usage; monitor capacity and back up these collections with application records.
+
+The Blueprint generates two separate JWT secrets. Keep existing strong secrets when configuring an existing service to retain sessions. `CLIENT_URL` defaults to Render's provided `RENDER_EXTERNAL_URL`; for a custom domain, set `CLIENT_URL` to its exact HTTPS origin. Add only exact trusted origins to `CLIENT_ADDITIONAL_ORIGINS`. The browser uses `VITE_API_URL=/api`.
+
+For an empty database, supply `BOOTSTRAP_ADMIN_EMAIL` and a unique `BOOTSTRAP_ADMIN_PASSWORD` (at least 16 characters, at most 72 UTF-8 bytes); remove these variables after the first successful setup. Existing accounts are preserved. Startup refuses an active administrator using the known demo password: change that password through the existing application before deploying. It never silently resets an existing password. `npm run seed` is blocked in production.
+
+For an **existing manually created Render service**, apply these settings in its dashboard; committing a Blueprint alone does not configure an unlinked service:
+
+| Setting | Value |
+| --- | --- |
+| Root Directory | Repository root (leave empty) |
+| Build Command | `npm ci --include=dev && npm run check && npm run build` |
+| Start Command | `npm start` |
+| Health Check Path | `/api/health/ready` |
+| Auto-Deploy | On Commit |
+| `NODE_VERSION` | `22` |
+| `NODE_ENV` | `production` |
+| `VITE_API_URL` | `/api` |
+| `COOKIE_SECURE` | `true` |
+| `MEDIA_STORAGE_DRIVER` | `mongo` |
+
+Also set `MONGODB_URI`, `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET`, plus bootstrap credentials only for a fresh database. Remove any stale `MEDIA_STORAGE_DRIVER=local` setting. Optional browser push requires matching server `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY`/`VAPID_SUBJECT` and build-time `VITE_VAPID_PUBLIC_KEY`.
+
+**Existing local media:** restoring MongoDB does not copy `uploads` bytes. From the original machine that still has the files, configure `MONGODB_URI` to the confirmed target, then run `npm run media:migrate -- --database=dg-energy` for a read-only inventory. Only after reviewing that inventory and backing up the target, explicitly run `npm run media:migrate -- --database=dg-energy --apply`. It copies files into private GridFS, updates matching user/guard/document references, skips already migrated files and retains local originals. Do not run it automatically on deployment. Missing source files must be recovered separately. Existing attendance photos stored inside MongoDB remain unchanged.
+
+Render Free still sleeps after inactivity and has temporary local storage. GridFS protects new uploads from local disk loss, but the in-process reminder scheduler cannot run while the service sleeps. It checks current reminders on startup/wake-up. Always-on duty reminders require an always-on service or a separately approved scheduler; this configuration cannot remove the provider restriction. See [Render Free limits](https://render.com/docs/free).
+
+After deployment, verify `/api/health/ready` returns 200, login and refresh work, frontend deep links reload, a private document/profile upload survives redeploy, and real mobile HTTPS camera submission enforces slot deadlines. A local build does not prove these live checks.
 
 Generate secrets instead of copying examples:
 
